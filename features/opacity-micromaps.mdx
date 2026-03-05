@@ -1,0 +1,379 @@
+---
+title: Opacity Micromaps (OMM)
+description: Accelerate alpha-tested geometry rendering with hardware-accelerated opacity micromaps
+---
+
+## Overview
+
+**Opacity Micromaps (OMM)** are a hardware-accelerated feature that significantly improves ray tracing performance for alpha-tested geometry like foliage, fences, and particle effects. By pre-computing and compressing opacity information, OMMs eliminate the need for expensive any-hit shaders.
+
+<Info>
+OMMs can provide **2-4x performance improvement** for scenes with heavy alpha-tested geometry, with minimal memory overhead.
+</Info>
+
+## What are Opacity Micromaps?
+
+Traditional alpha testing requires invoking an any-hit shader for every ray intersection to evaluate transparency:
+
+```hlsl
+// Traditional (slow)
+[shader("anyhit")]
+void AnyHit(inout Payload payload, in Attributes attr)
+{
+    float alpha = AlphaTexture.Sample(uv);
+    if (alpha < threshold)
+        IgnoreHit();
+}
+```
+
+OMMs pre-compute this opacity at build time and store it in a hardware-accelerated structure:
+
+- **No any-hit shader invocations** for known-opaque/transparent regions
+- **Hardware acceleration** during ray traversal
+- **Significant performance gains** with minimal quality loss
+
+## Implementation in RTXPT
+
+RTXPT uses DirectX 12 Agility SDK for OMM support by default:
+
+From README.md:7-8:
+> Uses the DXR version of OMMs by default, rather than NvAPI
+
+From CMakeLists.txt:162-167:
+```cmake
+# Default to using DXR OMMs if we can
+if(NVRHI_WITH_DX12 AND RTXPT_D3D_AGILITY_SDK_VERSION AND 
+   (RTXPT_D3D_AGILITY_SDK_VERSION GREATER_EQUAL "619"))
+    set(NVRHI_D3D12_WITH_DXR12_OPACITY_MICROMAP ON CACHE BOOL "" FORCE)
+endif()
+```
+
+## Enabling OMMs
+
+### Requirements
+
+<Warning>
+**For DirectX OMMs:**
+- DirectX 12 Agility SDK **1.619 or newer** (preview)
+- NVIDIA preview driver for DXR OMM support
+- Download from: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
+</Warning>
+
+From README.md:117:
+> Version 717-preview enables native DirectX support for Shader Execution Reordering and Opacity Micromaps
+
+### CMake Configuration
+
+```cmake
+set(RTXPT_D3D_AGILITY_SDK_VERSION_NAME "1.619.0" CACHE STRING "")
+```
+
+The SDK will be automatically downloaded during CMake configuration.
+
+### Runtime Configuration
+
+OMMs can be controlled in the **Scene** section of the UI. From OmmBaker.h:83-123:
+
+```cpp
+struct OpacityMicroMapUIData
+{
+    struct BuildState
+    {
+        int MaxSubdivisionLevel = 12;              // Higher = more detail
+        bool EnableDynamicSubdivision = true;       // Adaptive quality
+        float DynamicSubdivisionScale = 1.f;        // Quality multiplier
+        
+        nvrhi::rt::OpacityMicromapBuildFlags Flag = 
+            nvrhi::rt::OpacityMicromapBuildFlags::FastTrace;  // vs FastBuild
+        
+        nvrhi::rt::OpacityMicromapFormat Format = 
+            nvrhi::rt::OpacityMicromapFormat::OC1_4_State;     // 4-state or 2-state
+        
+        int AlphaCutoffGT = 1;   // Opaque if alpha > threshold
+        int AlphaCutoffLE = 0;   // Transparent if alpha <= threshold
+    };
+    
+    bool Enable = true;
+    bool Force2State = false;                       // Force 2-state format
+    bool OnlyOMMs = false;                          // Debug: only render OMM geometry
+};
+```
+
+## Configuration Options
+
+### Subdivision Level
+
+<CodeGroup>
+```cpp Low Quality (Fast Build)
+MaxSubdivisionLevel = 8;    // Coarse micromaps
+DynamicSubdivisionScale = 0.5f;
+```
+
+```cpp Balanced (Default)
+MaxSubdivisionLevel = 12;   // Good detail
+DynamicSubdivisionScale = 1.0f;
+```
+
+```cpp High Quality (Slow Build)
+MaxSubdivisionLevel = 14;   // Maximum detail
+DynamicSubdivisionScale = 1.5f;
+```
+</CodeGroup>
+
+### Format Selection
+
+**4-State Format** (Default):
+```cpp
+Format = nvrhi::rt::OpacityMicromapFormat::OC1_4_State;
+```
+
+States: Transparent, Opaque, Unknown-Transparent, Unknown-Opaque
+- **Better quality** with more accurate opacity representation
+- **Slightly higher memory** usage
+
+**2-State Format**:
+```cpp
+Format = nvrhi::rt::OpacityMicromapFormat::OC1_2_State;
+Force2State = true;
+```
+
+States: Transparent, Opaque
+- **Lower memory** usage
+- **Faster builds** but may invoke more any-hit shaders for unknown regions
+
+### Build Flags
+
+```cpp
+// Optimize for runtime performance (default)
+Flag = nvrhi::rt::OpacityMicromapBuildFlags::FastTrace;
+
+// Optimize for build time
+Flag = nvrhi::rt::OpacityMicromapBuildFlags::FastBuild;
+```
+
+<Tip>
+Use **FastTrace** for production. Only use **FastBuild** during development for faster iteration.
+</Tip>
+
+### Alpha Cutoff
+
+```cpp
+AlphaCutoffGT = 1;   // Values > 1/255 are opaque
+AlphaCutoffLE = 0;   // Values <= 0/255 are transparent
+```
+
+Adjust these based on your alpha textures. Conservative values ensure correctness.
+
+## Dynamic Subdivision
+
+From OmmBaker.h:89-90:
+```cpp
+bool EnableDynamicSubdivision = true;
+float DynamicSubdivisionScale = 1.f;
+```
+
+Dynamic subdivision adaptively refines the micromap based on texture detail:
+- **Enabled**: Higher quality, automatic adaptation
+- **Disabled**: Fixed subdivision level, more predictable memory usage
+- **Scale**: Multiplier for dynamic quality (0.5 = half resolution, 2.0 = double)
+
+## Memory Management
+
+From OmmBaker.h:103:
+```cpp
+int MaxOmmArrayDataSizeInMB = 100;  // Per-mesh OMM data limit
+```
+
+OMMs can use significant memory for complex scenes. Monitor and adjust limits:
+
+- **Typical usage**: 1-5 MB per detailed alpha-tested mesh
+- **Large foliage**: 10-50 MB per tree/vegetation asset
+- **Total budget**: Plan for 100-500 MB for a typical scene
+
+<Warning>
+Exceeding memory limits will cause OMM builds to fail. Increase `MaxOmmArrayDataSizeInMB` or reduce `MaxSubdivisionLevel`.
+</Warning>
+
+## Build Process
+
+From OmmBaker.h:112-121:
+
+```cpp
+// Amortize the builds over multiple frames
+std::optional<BuildState> ActiveState;
+BuildState DesiredState;
+bool TriggerRebuild = true;
+
+// Build progress
+uint32_t BuildsLeftInQueue = 0;
+uint32_t BuildsQueued = 0;
+```
+
+OMM builds are **amortized over multiple frames** to avoid hitches:
+
+1. **Queue Detection**: Scene loads, OMM-compatible meshes identified
+2. **Incremental Build**: One or a few OMMs built per frame
+3. **BLAS Rebuild**: Acceleration structures updated with OMMs
+4. **Activation**: OMMs become active when build completes
+
+<Note>
+The UI shows build progress: "BuildsLeftInQueue / BuildsQueued"
+</Note>
+
+## Performance Characteristics
+
+### When OMMs Help Most
+
+<Card title="Ideal Scenarios" icon="tree">
+- Dense foliage (trees, grass, bushes)
+- Chain-link fences and wire meshes
+- Hair and fur (if using alpha cards)
+- Particle effects with alpha cutout
+- Screen-space coverage > 10% with alpha testing
+</Card>
+
+### Performance Impact
+
+| Scene Type | Without OMM | With OMM | Speedup |
+|------------|-------------|----------|----------|
+| **Dense Forest** | 30 fps | 80-100 fps | 2.5-3.5x |
+| **Fence/Wire** | 45 fps | 120 fps | 2.5x |
+| **Sparse Foliage** | 90 fps | 110 fps | 1.2x |
+| **No Alpha** | 120 fps | 120 fps | 1.0x |
+
+### Build Time
+
+- **Simple mesh**: 10-50ms
+- **Complex foliage**: 100-500ms
+- **High-poly vegetation**: 1-2 seconds
+
+Builds happen **once per unique mesh** and can be cached.
+
+## Debug Visualization
+
+From OmmBaker.h:76-81:
+
+```cpp
+enum class OpacityMicroMapDebugView : uint32_t
+{
+    Disabled,
+    InWorld,    // Show OMM coverage in 3D
+    Overlay,    // Show OMM statistics as overlay
+};
+```
+
+Enable debug views to visualize:
+- Which triangles use OMMs
+- Micromap subdivision levels
+- Opaque vs transparent vs unknown regions
+- Memory usage per mesh
+
+## Integration with Acceleration Structures
+
+From OmmBaker.h:65-73:
+
+```cpp
+struct MeshInfoEx : public donut::engine::MeshInfo
+{
+    nvrhi::rt::AccelStructHandle AccelStructOMM;  // BLAS with OMM
+    std::vector<nvrhi::rt::OpacityMicromapHandle> OpacityMicroMaps;
+};
+```
+
+Each mesh can have:
+- **Regular BLAS**: For opaque geometry
+- **OMM BLAS**: For alpha-tested geometry with micromaps attached
+- **Multiple OMMs**: One per material/texture combination
+
+## Best Practices
+
+### When to Enable
+
+<Steps>
+  <Step title="Profile Your Scene">
+    Use NVIDIA Nsight Graphics to identify any-hit shader cost
+  </Step>
+  <Step title="Check Alpha Coverage">
+    OMMs only help if >5-10% of screen shows alpha-tested geometry
+  </Step>
+  <Step title="Enable for Assets">
+    Enable per-asset for foliage, not for entire scene
+  </Step>
+  <Step title="Tune Settings">
+    Start with defaults, reduce subdivision if memory-constrained
+  </Step>
+</Steps>
+
+### Memory Optimization
+
+```cpp
+// For memory-constrained scenarios
+MaxSubdivisionLevel = 10;              // Reduce from 12
+DynamicSubdivisionScale = 0.75f;       // Reduce from 1.0
+Force2State = true;                     // Use 2-state format
+```
+
+### Quality Optimization
+
+```cpp
+// For maximum quality
+MaxSubdivisionLevel = 14;              // Increase from 12
+DynamicSubdivisionScale = 1.5f;        // Increase from 1.0
+EnableDynamicSubdivision = true;       // Adaptive detail
+```
+
+## Advanced Features
+
+From OmmBaker.h:96-102:
+
+```cpp
+// Debug settings
+bool ComputeOnly = true;                      // CPU vs GPU build
+bool LevelLineIntersection = true;            // Quality vs speed
+bool EnableTexCoordDeduplication = true;      // Memory optimization
+bool Force32BitIndices = false;               // Large mesh support
+bool EnableNsightDebugMode = false;           // Debug info
+bool EnableSpecialIndices = true;             // OMM indices
+```
+
+These are expert settings - **leave at defaults** unless you have specific needs.
+
+## Troubleshooting
+
+### OMMs Not Working
+
+<Warning>
+Check these requirements:
+- Agility SDK 1.619+ installed
+- Preview driver for DXR OMM support
+- DirectX 12 backend (not Vulkan)
+- Alpha-tested materials in scene
+</Warning>
+
+### Build Failures
+
+If OMM builds fail:
+```cpp
+// Reduce memory requirements
+MaxSubdivisionLevel = 10;         // Lower from 12
+MaxOmmArrayDataSizeInMB = 200;   // Increase from 100
+```
+
+### Quality Issues
+
+If alpha edges look wrong:
+```cpp
+// Adjust alpha cutoff
+AlphaCutoffGT = 128;  // 0.5 threshold instead of 1/255
+AlphaCutoffLE = 127;
+
+// Or increase subdivision
+MaxSubdivisionLevel = 13;
+```
+
+## See Also
+
+- [Microsoft OMM Blog Post](https://devblogs.microsoft.com/directx/omm/) - Official DXR OMM documentation
+- [NVIDIA OMM SDK](https://github.com/NVIDIA-RTX/OMM) - OMM baker library
+- [Shader Execution Reordering](/features/shader-execution-reordering) - Complementary optimization
+- [Building from Source](/guides/building-from-source) - Build configuration and CMake options

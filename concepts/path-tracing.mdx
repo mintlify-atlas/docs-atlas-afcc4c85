@@ -1,0 +1,298 @@
+---
+title: Path Tracing Fundamentals
+description: Understanding the path tracing implementation in RTX Path Tracing, including BSDF model, ray generation, and importance sampling
+---
+
+## Overview
+
+RTX Path Tracing implements a physically-based path tracer derived from NVIDIA's [Falcor Research Path Tracer](https://github.com/NVIDIAGameWorks/Falcor), ported to the C++/HLSL [Donut framework](https://github.com/NVIDIAGameWorks/donut). The path tracer uses Monte Carlo integration to solve the rendering equation, tracing light paths from the camera through the scene.
+
+## Core Path Tracing Loop
+
+The main path tracing algorithm is implemented in the ray generation shader:
+
+```hlsl
+[shader("raygeneration")]
+void RayGen()
+{
+    uint2 pixelPos = DispatchRaysIndex().xy;
+    PathState path;
+
+    // Initialize path with pixel position and pixel cone spread angle
+    path = PathTracer::EmptyPathInitialize(pixelPos, g_Const.ptConsts.camera.PixelConeSpreadAngle);
+    PathTracer::SetupPathPrimaryRay(path, Bridge::computeCameraRay(pixelPos));
+
+    PathTracer::WorkingContext workingContext = GetWorkingContext(path);
+    PathTracer::StartPixel(path, workingContext);
+
+    // Main path tracing loop - traces bounces until path terminates
+    while (path.isActive())
+        nextHit(path, workingContext, false);
+    
+    // Store final radiance and output data
+    PathTracer::CommitPixel(path, workingContext);
+}
+```
+
+### Path State
+
+The `PathState` structure tracks all information about a light path as it bounces through the scene:
+
+- **Origin and Direction**: Current ray origin and direction
+- **Throughput (`thp`)**: Accumulated path throughput (product of BSDF weights)
+- **Radiance (`L`)**: Accumulated radiance along the path
+- **Scene Length**: Total distance traveled
+- **Bounce Counters**: Surface bounces, diffuse bounces, etc.
+- **Ray Cone**: Texture LOD calculation using [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones)
+- **Interior List**: Nested dielectrics tracking
+
+<Note>
+The path tracer supports up to 96 bounces (configurable via `MAX_BOUNCE_COUNT`), though practical usage typically uses 24 bounces for reference mode and 3-6 for real-time mode.
+</Note>
+
+## BSDF Model (StandardBSDF)
+
+RTX Path Tracing uses a **StandardBSDF** model that combines multiple lobes for comprehensive material representation:
+
+### Available Lobes
+
+<Tabs>
+  <Tab title="Reflection">
+    - **Delta Reflection**: Ideal specular reflection (mirrors)
+    - **Specular Reflection**: GGX microfacet model for glossy surfaces
+    - **Diffuse Reflection**: Disney's diffuse BRDF
+  </Tab>
+  <Tab title="Transmission">
+    - **Delta Transmission**: Ideal specular transmission (glass)
+    - **Specular Transmission**: GGX microfacet model for glossy transmission
+    - **Diffuse Transmission**: Diffuse transmission through thin surfaces
+  </Tab>
+</Tabs>
+
+### BSDF Sampling
+
+The BSDF supports both importance sampling and reference (cosine-weighted) sampling:
+
+```hlsl
+struct StandardBSDF
+{
+    StandardBSDFData data;      // BSDF parameters
+    float3 emission;            // Emitted radiance
+
+    // Evaluate BSDF for a given outgoing direction
+    float4 eval(const ShadingData shadingData, const float3 wo);
+
+    // Importance sample the BSDF
+    bool sample(const ShadingData shadingData, 
+                const float4 preGeneratedSamples, 
+                out BSDFSample result, 
+                bool useImportanceSampling);
+
+    // Evaluate PDF for a given direction
+    float evalPdf(const ShadingData shadingData, 
+                  const float3 wo, 
+                  bool useImportanceSampling);
+};
+```
+
+### Material Properties
+
+The BSDF computes material properties including:
+
+- **Roughness**: Surface roughness (clamped to represent actual GGX alpha)
+- **Diffuse Albedo**: Reflection and transmission components
+- **Specular Albedo**: Reflection and transmission components
+- **Specular Reflectance**: For Fresnel calculations
+- **Transmission Flags**: Whether material is transmissive
+
+## Ray Generation and Intersection
+
+### Primary Ray Setup
+
+Primary rays are generated from the camera with proper jitter for anti-aliasing:
+
+```cpp
+float2 ComputeCameraJitter(uint frameIndex)
+{
+    // Uses temporal anti-aliasing jitter patterns (R2, Halton, etc.)
+    // Applied as pixel offset for distributed ray tracing
+}
+```
+
+### Hit Processing
+
+When a ray intersects geometry, the closest hit shader processes the intersection:
+
+```hlsl
+[shader("closesthit")]
+void ClosestHit(inout PathPayload payload, 
+                in BuiltInTriangleIntersectionAttributes attrib)
+{
+    PathState path = PathPayload::unpack(payload, packedHitInfo);
+    PathTracer::HandleHit(optimizationHints, path, 
+                         WorldRayOrigin(), WorldRayDirection(), 
+                         RayTCurrent(), workingContext);
+    payload = PathPayload::pack(path);
+}
+```
+
+<Info>
+The implementation uses **8 closest hit shader variants** optimized for different material types based on three optimization hints:
+- `NoTextures`: Material has no textures
+- `NoTransmission`: Material is opaque
+- `OnlyDeltaLobes`: Material has only delta (perfect specular/transmission) lobes
+</Info>
+
+### Alpha Testing
+
+Opacity is handled through an any-hit shader that performs alpha testing:
+
+```hlsl
+[shader("anyhit")]
+void AnyHit(inout PathPayload payload, 
+            in BuiltInTriangleIntersectionAttributes attrib)
+{
+    if (!Bridge::AlphaTest(InstanceID(), InstanceIndex(), 
+                          GeometryIndex(), PrimitiveIndex(), 
+                          attrib.barycentrics))
+        IgnoreHit();
+}
+```
+
+## Importance Sampling
+
+### Next Event Estimation (NEE)
+
+The path tracer implements **Next Event Estimation** with adaptive importance sampling for direct lighting:
+
+```hlsl
+PathLightSample GenerateLightSample(
+    const WorkingContext workingContext,
+    const ShadingData shadingData,
+    const ActiveBSDF bsdf,
+    const uint wrsCandidateSampleCount,
+    inout UniformSampleSequenceGenerator sampleGeneratorLights,
+    inout UniformSampleSequenceGenerator sampleGeneratorWRS,
+    const LightSampler lightSampler,
+    const bool sampleIsLocal)
+{
+    WRSSingleSampleHelper wrs = WRSSingleSampleHelper::make();
+    
+    // Weighted Reservoir Sampling: pick best light from candidates
+    for (uint i = 0; i < wrsCandidateSampleCount; i++)
+    {
+        // Sample a light index with importance
+        uint lightIndex = lightSampler.SampleLocal/Global(rnd, selectionPdf);
+        
+        // Calculate light sample and its contribution
+        PolymorphicLightSample lightSample = 
+            PolymorphicLight::CalcSample(packedLightInfo, 
+                                        interiorSampleRnd, 
+                                        shadingData.posW);
+        
+        // Insert into reservoir with weight based on BSDF
+        wrs.InsertCandidate(rnd, candidateSample, 
+                           EvalSampleWeight(candidateSample, shadingData, bsdf));
+    }
+    
+    return wrs.GetResult(wrsCandidateSampleCount);
+}
+```
+
+<Accordion title="NEE Adaptive Temporal (NEE-AT) Algorithm">
+NEE-AT uses feedback-based, temporally adaptive importance sampling:
+
+1. **Candidate Sampling**: Generate multiple candidate light samples (configurable, default 4)
+2. **Weighted Reservoir Sampling**: Select best candidate based on BSDF contribution
+3. **Temporal Feedback**: Accumulate light importance over frames
+4. **Adaptive Weights**: Adjust light sampling probabilities based on feedback
+
+This approach significantly reduces noise in scenes with many lights by learning which lights contribute most to each pixel over time.
+</Accordion>
+
+### Sample Generator
+
+The path tracer uses low-discrepancy sampling based on [Practical Hash-based Owen Scrambling](https://jcgt.org/published/0009/04/01/paper.pdf):
+
+- **Deterministic sequences** per pixel and bounce
+- **Better stratification** than pure random sampling
+- **Hash-based scrambling** for uncorrelated samples across pixels
+
+## Russian Roulette
+
+Path termination uses Russian Roulette to avoid bias while improving performance:
+
+```hlsl
+bool HandleRussianRoulette(inout PathState path, 
+                          const SampleGeneratorVertexBase sgBase, 
+                          const WorkingContext workingContext)
+{
+    const float rrVal = sqrt(Luminance(path.thp)); // perceptual weighting
+    
+    // Probability to terminate (milder than classic RR)
+    float prob = saturate(0.85 - rrVal);
+    prob = prob * prob;
+    
+    // Start RR after 40% of bounce limit
+    float bounceRatioAboveThreshold = 
+        (vertexIndex - 0.4 * maxBounces) / (0.2 * maxBounces);
+    prob *= saturate(bounceRatioAboveThreshold);
+    
+    if (sampleNext1D(sampleGenerator) < prob)
+    {
+        path.setInactive(); // Terminate path
+        return true;
+    }
+    
+    // Increase throughput to maintain unbiased estimate
+    path.thp /= (1.0 - prob);
+    return false;
+}
+```
+
+## Texture LOD Selection
+
+Texture mip level selection uses **RayCones** for accurate filtering:
+
+1. **Ray Cone Initialization**: Start with pixel cone spread angle
+2. **Cone Propagation**: Expand cone based on distance and surface curvature
+3. **MIP Selection**: Convert cone width to texture space for LOD calculation
+
+```cpp
+static const uint ACTIVE_LOD_TEXTURE_SAMPLER = LOD_TEXTURE_SAMPLER_RAY_CONES;
+```
+
+## Firefly Filter
+
+To reduce fireflies (bright outlier pixels), an optional firefly filter clamps radiance contributions:
+
+```hlsl
+#define RTXPT_FIREFLY_FILTER 1
+
+// Reference mode: threshold = 5.0 (conservative)
+// Real-time mode: threshold = 0.15 (aggressive)
+```
+
+The filter adaptively clamps high-variance samples while preserving important detail.
+
+## Supported Light Types
+
+The path tracer supports:
+
+- **Directional Lights**: Sun/sky lighting
+- **Point Lights**: Omnidirectional point sources
+- **Spot Lights**: Cone-shaped area lights
+- **Emissive Triangles**: Mesh-based area lights
+- **Environment Map**: Image-based lighting with importance sampling
+
+## Volumes and Nested Dielectrics
+
+The implementation includes:
+
+- **Homogeneous volumes** with absorption and scattering
+- **Nested dielectrics** with priority-based interior tracking
+- **Up to 4 simultaneous interiors** tracked in the interior list
+
+<Note>
+For detailed information about rendering modes and performance characteristics, see [Rendering Modes](/concepts/rendering-modes).
+</Note>

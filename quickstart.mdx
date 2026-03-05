@@ -1,80 +1,278 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get RTX Path Tracing running in under 5 minutes
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
+This guide will get you up and running with RTX Path Tracing quickly. For more detailed installation instructions, see the [Installation](/installation) page.
 
-### Step 1: Set up your local environment
+## Prerequisites Check
+
+Before you begin, verify you have:
+
+<Steps>
+  <Step title="Hardware Requirements">
+    - DXR-capable NVIDIA GPU (RTX 20-series or newer recommended)
+    - GeForce Game Ready Driver 580.88 or newer
+  </Step>
+  
+  <Step title="Software Requirements">
+    - Windows 10 20H1 (version 2004) or newer
+    - Visual Studio 2022 with C++ development tools
+    - CMake 4.02 or newer
+    - Git with submodule support
+  </Step>
+</Steps>
+
+## Setup in 4 Steps
+
+<Steps>
+  <Step title="Clone the Repository">
+    Clone the repository with all submodules recursively. This is **critical** - the project depends on multiple SDK submodules.
+    
+    ```bash
+    git clone --recursive https://github.com/NVIDIA-RTX/RTXPT.git
+    cd RTXPT
+    ```
+    
+    <Note>
+    The `--recursive` flag is essential. Without it, required dependencies like Donut, Streamline, NRD, RTXDI, and OMM won't be downloaded.
+    </Note>
+    
+    If you forgot the `--recursive` flag, you can fix it:
+    ```bash
+    git submodule update --init --recursive
+    ```
+  </Step>
+  
+  <Step title="Configure with CMake">
+    Generate the Visual Studio project files using CMake:
+    
+    ```bash
+    cmake CMakeLists.txt -B ./build
+    ```
+    
+    <Tip>
+    If you need a specific Visual Studio version:
+    ```bash
+    cmake CMakeLists.txt -B ./build -G "Visual Studio 17 2022" -A x64
+    ```
+    </Tip>
+    
+    CMake will automatically:
+    - Download DirectX Shader Compiler (DXC) v1.9.2602.17
+    - Download DirectX 12 Agility SDK 1.619.0 (enables SER and OMM)
+    - Configure all SDK paths
+    - Set up shader compilation
+  </Step>
+  
+  <Step title="Build the Solution">
+    Open the generated solution in Visual Studio:
+    
+    ```bash
+    start build/RTXPathTracing.sln
+    ```
+    
+    Or build from the command line:
+    ```bash
+    cmake --build ./build --config Release
+    ```
+    
+    <Note>
+    The build process compiles both the C++ application and all HLSL shaders. First build may take several minutes.
+    </Note>
+    
+    Build outputs go to:
+    - Binaries: `bin/`
+    - Compiled shaders: `bin/ShaderPrecompiled/`
+  </Step>
+  
+  <Step title="Run the Application">
+    Launch from Visual Studio by setting `Rtxpt` as the startup project and pressing F5, or run directly:
+    
+    ```bash
+    cd bin
+    .\Rtxpt.exe
+    ```
+    
+    The application will start with a default scene. Assets are loaded from the `Assets/` folder.
+  </Step>
+</Steps>
+
+## First Scene
+
+Once the application launches, you'll see:
+
+- **Left Panel**: UI controls for all path tracing parameters
+- **Top Center**: Scene selection and settings dropdowns
+- **Viewport**: Real-time path traced output
+
+### Camera Controls
+
+<CodeGroup>
+```plaintext Movement
+W/A/S/D     - Move camera forward/left/back/right
+Q/E         - Move camera down/up
+Shift       - Move faster
+Ctrl        - Move slower
+```
+
+```plaintext View
+Left Click + Drag   - Rotate camera
+Mouse Wheel         - Adjust movement speed
+```
+</CodeGroup>
+
+## Loading Different Scenes
+
+<Tabs>
+  <Tab title="Command Line">
+    Load a specific scene at startup:
+    ```bash
+    .\Rtxpt.exe --scene programmer-art.scene.json
+    ```
+  </Tab>
+  
+  <Tab title="Runtime">
+    Use the scene dropdown in the top-center of the UI to switch scenes while the application is running.
+  </Tab>
+</Tabs>
+
+## Common Command Line Options
+
+```bash Command Line Examples
+# Set window resolution
+.\Rtxpt.exe --width 3840 --height 2160
+
+# Start in fullscreen
+.\Rtxpt.exe --width 3840 --height 2160 --fullscreen
+
+# Enable Vulkan backend
+.\Rtxpt.exe --vk
+
+# Enable debug layer for development
+.\Rtxpt.exe --debug
+
+# Combine options
+.\Rtxpt.exe --scene programmer-art.scene.json --width 1920 --height 1080
+```
+
+## Exploring Features
+
+Now that you're running, try these features:
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+  <Accordion title="Enable DLSS Super Resolution">
+    1. In the left UI panel, find the **Streamline** section
+    2. Enable **DLSS Super Resolution**
+    3. Choose a performance mode (Quality, Balanced, Performance, or Ultra Performance)
+    4. Notice the improved performance with maintained visual quality
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+    <Note>Requires an RTX GPU with DLSS support</Note>
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+  
+  <Accordion title="Try Reference Mode">
+    1. Find the **Path Tracer** section in the left panel
+    2. Switch from **Real-time** to **Reference** mode
+    3. Let samples accumulate for ground-truth rendering
+    4. Use the photo mode to save denoised screenshots
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+    Reference mode provides physically accurate, noise-free renders.
+  </Accordion>
+  
+  <Accordion title="Enable Ray Reconstruction">
+    1. Navigate to **DLSS Ray Reconstruction** in the UI
+    2. Toggle it on
+    3. Observe improved quality with fewer samples per pixel
+    
+    DLSS-RR uses AI to denoise and reconstruct ray traced outputs.
+  </Accordion>
+  
+  <Accordion title="Adjust Denoising">
+    1. Find the **NRD Denoiser** section
+    2. Switch between **ReLAX** and **ReBLUR** denoisers
+    3. Adjust denoiser strength and quality settings
+    4. Compare visual quality and performance
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+## Verification
+
+To verify everything is working correctly:
+
+<Steps>
+  <Step title="Check Frame Rate">
+    Look at the top-right corner for FPS information. You should see:
+    - Render resolution
+    - Display resolution (if using DLSS)
+    - Frame time and FPS
+  </Step>
+  
+  <Step title="Move the Camera">
+    Use W/A/S/D to move around. The path tracer should respond smoothly with temporal accumulation in real-time mode.
+  </Step>
+  
+  <Step title="Check Console">
+    No errors should appear in the console window. Warnings about Streamline features are normal if you don't have the latest drivers.
+  </Step>
+</Steps>
+
+## Troubleshooting
 
 <AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+  <Accordion title="Build Errors">
+    **Missing submodules**: Run `git submodule update --init --recursive`
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
+    **CMake configuration failed**: Ensure you have:
+    - Visual Studio 2022 with C++ tools
+    - Windows 10 SDK 10.0.20348.0 or newer
+    - CMake 4.02+
+  </Accordion>
+  
+  <Accordion title="Application Won't Launch">
+    **DLL not found**: Make sure you're running from the `bin/` directory or that it's in your PATH
+    
+    **GPU not supported**: Requires DXR 1.1 capable GPU (RTX 20-series or newer, or equivalent)
+    
+    **Driver too old**: Update to GeForce Game Ready Driver 580.88 or newer
+  </Accordion>
+  
+  <Accordion title="Performance Issues">
+    - Try lowering the render resolution
+    - Enable DLSS Super Resolution
+    - Reduce samples per pixel in real-time mode
+    - Disable expensive features like RTXDI or multiple denoiser layers
+  </Accordion>
+  
+  <Accordion title="Black Screen or Rendering Artifacts">
+    - Update your GPU driver to the latest version
+    - Try running without the `--debug` flag
+    - On AMD GPUs with Vulkan, try DirectX 12 instead (remove `--vk` flag)
   </Accordion>
 </AccordionGroup>
 
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+## Next Steps
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Detailed Installation" icon="screwdriver-wrench" href="/installation">
+    Learn about Vulkan setup, Agility SDK options, and advanced build configurations
+  </Card>
+  <Card title="User Interface Guide" icon="sliders">
+    Explore all UI controls and rendering parameters (coming soon)
+  </Card>
+  <Card title="Scene Creation" icon="cube">
+    Learn how to create custom scenes and import assets (coming soon)
+  </Card>
+  <Card title="SDK Integration" icon="plug">
+    Deep dive into RTXDI, NRD, and other SDK integrations (coming soon)
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Need Help?
+
+If you encounter issues:
+
+- Check the [GitHub Issues](https://github.com/NVIDIA-RTX/RTXPT/issues) page
+- Contact: pathtracing-sdk-support@nvidia.com
+- Review known issues in the README

@@ -1,0 +1,158 @@
+---
+title: Introduction
+description: Overview of NVIDIA RTX Path Tracing SDK - a production-ready path tracer with advanced features
+---
+
+# Introduction to RTX Path Tracing
+
+RTX Path Tracing is a high-performance, production-ready code sample that embodies years of NVIDIA's ray tracing and neural graphics research. Version 1.7.1 represents the cutting edge of real-time path tracing technology.
+
+## What is RTX Path Tracing?
+
+RTX Path Tracing is designed to serve multiple purposes:
+
+- **Starting Point**: A robust foundation for integrating path tracing into your own projects
+- **SDK Reference**: Demonstrates best practices for various integrated NVIDIA SDKs
+- **Learning Platform**: Educational resource for ray tracing and neural graphics experimentation
+
+The implementation derives from NVIDIA's [Falcor Research Path Tracer](https://github.com/NVIDIAGameWorks/Falcor), ported to the approachable C++/HLSL [Donut framework](https://github.com/NVIDIAGameWorks/donut).
+
+<Note>
+For a comprehensive introduction to the features and architecture, watch the GTC presentation [How to Build a Real-time Path Tracer](https://www.nvidia.com/gtc/session-catalog/?tab.catalogallsessionstab=16566177511100015Kus&search.industry=option_1559593201839#/session/1666651593475001NN25).
+</Note>
+
+## Key Features
+
+### Graphics API Support
+- **DirectX 12**: Full support with Agility SDK integration
+- **Vulkan**: Cross-platform rendering support
+- Dual backend architecture for maximum flexibility
+
+### Path Tracing Core
+- **Reference and Real-time Modes**: Switch between accuracy and performance
+- **Advanced BSDF Model**: Extensible material system
+- **glTF 2.0 Pipeline**: Simple asset workflow with animation support
+- **Volume Rendering**: Nested dielectrics with priority system
+
+### Lighting
+- **Multiple Light Types**: Directional, spot, point, emissive triangles, and environment maps
+- **NEE Lighting**: Feedback-based, temporally adaptive importance sampling
+- **Advanced Techniques**: 
+  - Low-discrepancy sampling using [Practical Hash-based Owen Scrambling](https://jcgt.org/published/0009/04/01/paper.pdf)
+  - [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) for texture MIP selection
+  - Russian Roulette early ray termination
+  - Firefly filtering
+
+### NVIDIA SDK Integrations
+
+<CardGroup cols={2}>
+  <Card title="RTXDI" icon="bolt">
+    ReSTIR DI for light importance sampling and ReSTIR GI for indirect lighting
+  </Card>
+  <Card title="NRD" icon="wand-magic-sparkles">
+    ReLAX and ReBLUR denoisers with up to 3-layer path space decomposition
+  </Card>
+  <Card title="OMM" icon="shapes">
+    Fast ray traced alpha testing with Opacity Micromaps
+  </Card>
+  <Card title="RTXTF" icon="image">
+    Stochastic Texture Filtering for better quality
+  </Card>
+</CardGroup>
+
+### Performance Technologies
+
+- **[Shader Execution Reordering (SER)](https://developer.nvidia.com/blog/improve-shader-performance-and-in-game-frame-rates-with-shader-execution-reordering/)**: Significant execution performance boost
+- **[Streamline](https://github.com/NVIDIAGameWorks/Streamline/) Integration**: Complete DLSS 4.0 support
+  - DLSS Ray Reconstruction
+  - DLSS Super Resolution
+  - DLSS Anti-Aliasing
+  - DLSS Frame Generation & Multi Frame Generation
+
+### Post-Processing
+- Temporal Anti-Aliasing (TAA)
+- Tone mapping
+- Bloom effects
+- Reference mode 'photo-mode' with [OptiX denoiser](https://developer.nvidia.com/optix-denoiser)
+
+## Architecture Overview
+
+The codebase is organized into focused, modular components:
+
+```
+/Rtxpt                    Core application (Sample.cpp/.h/.hlsl)
+/Rtxpt/PathTracer         Core path tracing shaders
+/Rtxpt/Lighting           Lighting system and environment maps
+/Rtxpt/Materials          Material baking and management
+/Rtxpt/RTXDI              RTXDI integration
+/Rtxpt/NRD                NRD denoiser integration
+/External                 SDKs: Donut, Streamline, NRD, RTXDI, OMM
+```
+
+### Core Entry Points
+
+The main application logic is centered in:
+- `Rtxpt/Sample.cpp` - Main application class and rendering loop
+- `Rtxpt/Sample.h` - Core interfaces and class definitions  
+- `Rtxpt/Sample.hlsl` - Primary shader entry points
+- `Rtxpt/PathTracer/*.hlsl` - Path tracing shader implementations
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="Game Development">
+    Integrate high-quality path tracing for cinematic modes, previsualization, or full real-time rendering with DLSS upscaling and frame generation.
+  </Accordion>
+  
+  <Accordion title="Professional Visualization">
+    Leverage the reference mode for physically accurate rendering in architecture, product design, and scientific visualization.
+  </Accordion>
+  
+  <Accordion title="Research & Education">
+    Study state-of-the-art path tracing techniques including ReSTIR, SER, and neural denoising in a well-documented, production-quality codebase.
+  </Accordion>
+  
+  <Accordion title="SDK Integration">
+    Learn how to properly integrate NVIDIA SDKs (RTXDI, NRD, OMM, Streamline) in a real-world application.
+  </Accordion>
+</AccordionGroup>
+
+## What's New in 1.7.1
+
+- **Agility SDK 1.619**: Updated to the latest DirectX features
+- **DXR Opacity Micromaps**: Now uses DXR version by default instead of NvAPI
+- **SM6.9 HitObject API**: Native Shader Execution Reordering support without NvAPI
+
+## System Requirements
+
+Before getting started, ensure your system meets these requirements:
+
+- **OS**: Windows 10 20H1 (version 2004-10.0.19041) or newer
+- **GPU**: DXR Capable (DirectX Raytracing 1.1 API or higher)
+- **Driver**: GeForce Game Ready Driver 580.88 or newer
+- **API**: DirectX 12 or Vulkan
+- **Build Tools**: 
+  - CMake v4.02+
+  - Visual Studio 2022 (v143 build tools)
+  - Windows 10 SDK version 10.0.20348.0 or 10.0.26100.0 or later
+
+<Warning>
+Linux support is planned for future releases but not currently available.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get up and running in minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed build instructions
+  </Card>
+</CardGroup>
+
+## License
+
+This project is licensed under NVIDIA's proprietary license. See [LICENSE.txt](https://github.com/NVIDIA-RTX/RTXPT/blob/main/LICENSE.txt) for details.
+
+NVAPI software usage is governed by the [NVAPI license terms](https://github.com/NVIDIA/nvapi/blob/main/License.txt).

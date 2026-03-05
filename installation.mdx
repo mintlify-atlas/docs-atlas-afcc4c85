@@ -1,0 +1,507 @@
+---
+title: Installation
+description: Detailed installation guide for DirectX 12 and Vulkan backends
+---
+
+# Installation Guide
+
+This guide provides detailed instructions for building RTX Path Tracing with both DirectX 12 and Vulkan backends.
+
+## System Requirements
+
+### Hardware Requirements
+
+<CardGroup cols={2}>
+  <Card title="GPU" icon="microchip">
+    **Minimum**: DXR 1.1 capable GPU
+    
+    **Recommended**: 
+    - NVIDIA RTX 40-series (for DLSS 4.0 features)
+    - NVIDIA RTX 30-series or 20-series (for DLSS 3.x)
+  </Card>
+  
+  <Card title="Driver" icon="compact-disc">
+    **Minimum**: GeForce Game Ready Driver 580.88
+    
+    **For Preview Features**: 
+    - Shader Model 6.9 preview driver for native SER/OMM support
+    - Download from [NVIDIA Developer](https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver)
+  </Card>
+</CardGroup>
+
+### Software Requirements
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| **Operating System** | Windows 10 20H1 (2004-10.0.19041) or newer | Linux support planned |
+| **Graphics API** | DirectX 12 or Vulkan | DirectX 12 enabled by default |
+| **CMake** | 4.02 or newer | Required for build configuration |
+| **Visual Studio** | 2022 (v143 build tools) | With C++ development workload |
+| **Windows SDK** | 10.0.20348.0 or 10.0.26100.0+ | Part of VS 2022 installation |
+| **Git** | Latest | With submodule support |
+
+<Warning>
+**Platform Support**: Only Windows builds are fully supported at this time. Linux support is planned for future releases.
+</Warning>
+
+## DirectX 12 Installation
+
+DirectX 12 is the default and recommended backend.
+
+<Steps>
+  <Step title="Clone Repository">
+    Clone with all submodules - this is **essential**:
+    
+    ```bash
+    git clone --recursive https://github.com/NVIDIA-RTX/RTXPT.git
+    cd RTXPT
+    ```
+    
+    The repository includes these critical submodules:
+    - **Donut**: Rendering framework
+    - **Streamline**: DLSS integration
+    - **NRD**: Neural denoising
+    - **RTXDI**: Direct and indirect illumination
+    - **OMM**: Opacity micromap SDK
+    - **NVAPI**: NVIDIA API extensions
+  </Step>
+  
+  <Step title="Configure Build">
+    Run CMake to generate Visual Studio project files:
+    
+    ```bash
+    cmake CMakeLists.txt -B ./build
+    ```
+    
+    This automatically:
+    - Downloads DXC shader compiler (v1.9.2602.17)
+    - Downloads DirectX 12 Agility SDK (v1.619.0 by default)
+    - Configures all build paths
+    - Sets up shader compilation pipelines
+    
+    <Accordion title="CMake Configuration Options">
+    ```bash Advanced CMake Options
+    # Specify Visual Studio version
+    cmake CMakeLists.txt -B ./build -G "Visual Studio 17 2022" -A x64
+    
+    # Use different Agility SDK version
+    cmake CMakeLists.txt -B ./build -DRTXPT_D3D_AGILITY_SDK_VERSION_NAME="1.717.0-preview"
+    
+    # Disable NVAPI (not recommended, reduces features and performance)
+    cmake CMakeLists.txt -B ./build -DNVRHI_WITH_NVAPI=OFF
+    
+    # Disable Streamline (no DLSS support)
+    cmake CMakeLists.txt -B ./build -DDONUT_WITH_STREAMLINE=OFF
+    ```
+    </Accordion>
+  </Step>
+  
+  <Step title="Build">
+    **Option A: Visual Studio**
+    ```bash
+    start build/RTXPathTracing.sln
+    ```
+    Set `Rtxpt` as the startup project, select configuration (Debug or Release), and build (F7).
+    
+    **Option B: Command Line**
+    ```bash
+    cmake --build ./build --config Release -j
+    ```
+    
+    <Note>
+    **Build Configuration**:
+    - `Debug`: Enables validation layers, shader debugging, slower performance
+    - `Release`: Optimized build with embedded shader PDBs for debugging
+    
+    First build compiles all C++ code and HLSL shaders (5-15 minutes depending on hardware).
+    </Note>
+  </Step>
+  
+  <Step title="Verify Installation">
+    Binaries are output to `bin/` directory:
+    
+    ```plaintext Directory Structure
+    bin/
+    ├── Rtxpt.exe                      # Main executable
+    ├── D3D12/                         # Agility SDK binaries
+    ├── ShaderPrecompiled/             # Compiled shaders
+    │   ├── framework/dxil/
+    │   ├── Rtxpt/dxil/
+    │   └── nrd/dxil/
+    └── StreamlineDlls/                # DLSS and other SL features
+    ```
+    
+    Run the application:
+    ```bash
+    cd bin
+    .\Rtxpt.exe
+    ```
+  </Step>
+</Steps>
+
+## Vulkan Installation
+
+Vulkan support requires additional manual steps due to interactions with included libraries.
+
+<Warning>
+**Vulkan Limitations**: 
+- SER (Shader Execution Reordering) support is work in progress
+- OMM (Opacity Micromaps) support is work in progress  
+- Debug layer shows warnings/errors - fixes in progress
+- AMD GPUs may trigger TDR during TLAS building with null instances
+</Warning>
+
+<Steps>
+  <Step title="Install Vulkan SDK">
+    Download and install the Vulkan SDK:
+    
+    ```bash
+    # Tested with VulkanSDK-1.3.290.0
+    ```
+    
+    Download from: [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+    
+    <Note>
+    The Vulkan SDK includes a SPIR-V version of DXC which is required for shader compilation.
+    </Note>
+  </Step>
+  
+  <Step title="Clear CMake Cache">
+    If you previously configured for DirectX only:
+    
+    ```bash
+    # Delete build directory
+    rmdir /s /q build
+    
+    # Or clear CMake cache
+    del build\CMakeCache.txt
+    ```
+    
+    This ensures CMake picks up the correct DXC path from the Vulkan SDK.
+  </Step>
+  
+  <Step title="Configure with Vulkan Enabled">
+    ```bash
+    cmake CMakeLists.txt -B ./build -DDONUT_WITH_VULKAN=ON -DNVRHI_WITH_VULKAN=ON
+    ```
+    
+    Verify that `DXC_SPIRV_PATH` is automatically detected:
+    ```plaintext CMake Output
+    -- DXC_SPIRV_PATH: C:/VulkanSDK/1.3.290.0/Bin/dxc.exe
+    ```
+    
+    If not detected, set it manually:
+    ```bash
+    cmake CMakeLists.txt -B ./build -DDONUT_WITH_VULKAN=ON -DNVRHI_WITH_VULKAN=ON -DDXC_SPIRV_PATH="C:/VulkanSDK/1.3.290.0/Bin/dxc.exe"
+    ```
+  </Step>
+  
+  <Step title="Build with Vulkan Support">
+    Build the same way as DirectX:
+    
+    ```bash
+    cmake --build ./build --config Release -j
+    ```
+    
+    This compiles shaders for both DXIL (DirectX) and SPIR-V (Vulkan):
+    ```plaintext
+    bin/ShaderPrecompiled/Rtxpt/
+    ├── dxil/          # DirectX shaders
+    └── spirv/         # Vulkan shaders
+    ```
+  </Step>
+  
+  <Step title="Run with Vulkan">
+    Use the `--vk` command line flag:
+    
+    ```bash
+    cd bin
+    .\Rtxpt.exe --vk
+    ```
+    
+    The application will use the Vulkan backend instead of DirectX 12.
+  </Step>
+</Steps>
+
+## DirectX 12 Agility SDK
+
+The Agility SDK provides access to the latest DirectX 12 features.
+
+### What is Agility SDK?
+
+The [DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/) decouples DirectX 12 from Windows updates, enabling:
+- **Native Shader Execution Reordering**: SM6.9 HitObject API without NvAPI
+- **Native Opacity Micromaps**: DXR OMM support without NvAPI
+- **Latest DirectX Features**: Access to preview features before OS updates
+
+### Agility SDK Versions
+
+| Version | Features | Driver Required |
+|---------|----------|----------------|
+| **1.619.0** (default) | DXR OMM, SM6.9 SER | Standard Game Ready 580.88+ |
+| **1.717.0-preview** | Preview features | SM6.9 preview driver |
+| **1.719.0-preview** | Latest preview | SM6.9 preview driver |
+
+### Changing Agility SDK Version
+
+<Tabs>
+  <Tab title="CMake Configuration">
+    ```bash
+    # Use specific version
+    cmake CMakeLists.txt -B ./build -DRTXPT_D3D_AGILITY_SDK_VERSION_NAME="1.717.0-preview"
+    
+    # Disable Agility SDK (uses OS version)
+    cmake CMakeLists.txt -B ./build -DRTXPT_D3D_AGILITY_SDK_VERSION_NAME=""
+    ```
+  </Tab>
+  
+  <Tab title="Manual Download">
+    If auto-download fails:
+    
+    1. Download from [NuGet](https://www.nuget.org/packages/Microsoft.Direct3D.D3D12/)
+    2. Extract to `External/AgilitySDK/[version]/`
+    3. Set CMake variables:
+    ```bash
+    -DRTXPT_D3D_AGILITY_SDK_PATH="path/to/sdk"
+    -DRTXPT_D3D_AGILITY_SDK_VERSION="619"
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+For Agility SDK 1.717.0-preview or newer, download the [SM6.9 preview driver](https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver) to enable native SER and OMM support.
+</Note>
+
+## Build Configuration Options
+
+### CMake Variables
+
+```cmake Common CMake Options
+# Graphics API
+DONUT_WITH_DX11=OFF           # DX11 not supported
+DONUT_WITH_VULKAN=OFF         # Enable Vulkan
+NVRHI_WITH_VULKAN=OFF         # Enable NVRHI Vulkan support
+
+# NVIDIA Features  
+NVRHI_WITH_NVAPI=ON           # Enable NVIDIA API extensions
+DONUT_WITH_STREAMLINE=ON      # Enable DLSS/Streamline
+
+# Agility SDK
+RTXPT_D3D_AGILITY_SDK_VERSION_NAME="1.619.0"  # SDK version
+
+# Shader Compilation
+DONUT_EMBED_SHADER_PDBS=ON    # Embed PDBs for debugging
+
+# Output Directories
+CMAKE_RUNTIME_OUTPUT_DIRECTORY="${CMAKE_SOURCE_DIR}/bin"
+```
+
+### Streamline Features
+
+Customize which Streamline DLLs are included:
+
+```cmake Streamline Options
+STREAMLINE_FEATURE_DLSS_SR=ON    # Super Resolution
+STREAMLINE_FEATURE_DLSS_RR=ON    # Ray Reconstruction  
+STREAMLINE_FEATURE_DLSS_FG=ON    # Frame Generation
+STREAMLINE_FEATURE_REFLEX=ON     # NVIDIA Reflex
+STREAMLINE_FEATURE_IMGUI=ON      # ImGui integration
+STREAMLINE_FEATURE_NRD=OFF       # NRD (using native instead)
+STREAMLINE_FEATURE_NIS=OFF       # NIS upscaling
+STREAMLINE_FEATURE_NVPERF=OFF    # Nsight Perf SDK
+STREAMLINE_FEATURE_DEEPDVC=OFF   # DeepDVC
+STREAMLINE_FEATURE_DIRECTSR=OFF  # DirectSR
+```
+
+## Advanced Build Options
+
+### Shader Compilation
+
+Shaders are compiled during the build process. Configuration in `Rtxpt/shaders.cfg`:
+
+```plaintext Shader Pipeline
+Source:     Rtxpt/**/*.hlsl, Rtxpt/**/*.hlsli
+Compiler:   DXC 1.9.2602.17
+Target DX:  dxil (Shader Model 6.9 if Agility SDK ≥ 619)
+Target VK:  spirv (via DXC from Vulkan SDK)
+Output:     bin/ShaderPrecompiled/Rtxpt/{dxil,spirv}/
+Options:    --embedPDB, -D ENABLE_DEBUG_PRINT
+```
+
+### Debug vs Release
+
+<Tabs>
+  <Tab title="Debug Build">
+    ```bash
+    cmake --build ./build --config Debug
+    ```
+    
+    **Features:**
+    - Graphics API validation layers enabled
+    - Shader debugging with PIX/Nsight
+    - Iterator debug level 1 (faster than standard debug)
+    - Verbose error messages
+    - Lower performance
+  </Tab>
+  
+  <Tab title="Release Build">
+    ```bash
+    cmake --build ./build --config Release
+    ```
+    
+    **Features:**
+    - Full optimizations
+    - Shader PDBs embedded for debugging
+    - Debug symbols for profiling
+    - Maximum performance
+  </Tab>
+</Tabs>
+
+### Disabling Features for Compatibility
+
+<Note>
+If using PIX on Windows or other GPU debugging tools with compatibility issues:
+
+```bash
+cmake CMakeLists.txt -B ./build -DNVRHI_WITH_NVAPI=OFF -DDONUT_WITH_STREAMLINE=OFF
+```
+
+**Warning**: This results in lower performance and missing features.
+</Note>
+
+## Binary Distribution
+
+To create a redistributable build:
+
+<Steps>
+  <Step title="Build Release">
+    ```bash
+    cmake --build ./build --config Release
+    ```
+  </Step>
+  
+  <Step title="Copy Required Folders">
+    ```plaintext
+    MyDistribution/
+    ├── bin/
+    │   ├── Rtxpt.exe
+    │   ├── D3D12/              # Agility SDK
+    │   ├── ShaderPrecompiled/   # All compiled shaders
+    │   └── StreamlineDlls/      # DLSS DLLs
+    ├── Assets/                  # Scenes and textures
+    └── Support/                 # Optional tools
+    ```
+  </Step>
+  
+  <Step title="Note on Asset Loading">
+    The application searches for assets in:
+    1. `./Assets/` (relative to executable)
+    2. `../Assets/` (parent directory)
+    
+    Place Assets folder appropriately for your distribution.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="CMake Configuration Fails">
+    **Missing Visual Studio 2022**:
+    - Install VS 2022 with "Desktop development with C++"
+    - Ensure Windows 10 SDK 10.0.20348.0+ is installed
+    
+    **Git submodules missing**:
+    ```bash
+    git submodule update --init --recursive
+    ```
+    
+    **CMake version too old**:
+    ```bash
+    # Download CMake 4.02+ from cmake.org
+    cmake --version  # Verify
+    ```
+  </Accordion>
+  
+  <Accordion title="Build Errors">
+    **Shader compilation errors**:
+    - Verify DXC was downloaded to `External/dxc/`
+    - Check `DXC_PATH` in CMake output
+    - For Vulkan: Ensure Vulkan SDK is installed
+    
+    **Missing Windows SDK**:
+    - Install Windows 10 SDK 10.0.20348.0 or 10.0.26100.0
+    - Via Visual Studio Installer
+    
+    **Streamline errors**:
+    - Verify `External/Streamline/` submodule exists
+    - Set `DONUT_WITH_STREAMLINE=OFF` to build without it
+  </Accordion>
+  
+  <Accordion title="Runtime Errors">
+    **D3D12Core.dll not found**:
+    - Agility SDK DLLs missing from `bin/D3D12/`
+    - Rebuild or manually copy from `External/AgilitySDK/.../bin/x64/`
+    
+    **Streamline DLLs not found**:
+    - Check `bin/StreamlineDlls/` exists
+    - May need to copy from `External/Streamline/bin/`
+    
+    **Shader files not found**:
+    - Ensure running from `bin/` directory
+    - Or copy `bin/ShaderPrecompiled/` next to executable
+  </Accordion>
+  
+  <Accordion title="Vulkan-Specific Issues">
+    **DXC_SPIRV_PATH not found**:
+    - Install Vulkan SDK from lunarg.com
+    - Clear CMake cache and reconfigure
+    - Manually set: `-DDXC_SPIRV_PATH="C:/VulkanSDK/.../Bin/dxc.exe"`
+    
+    **Validation layer errors**:
+    - Expected in current version, fixes in progress
+    - Disable debug layer (remove `--debug` flag)
+    
+    **TDR on AMD**:
+    - Known issue with null TLAS instances
+    - Use DirectX 12 instead on AMD hardware
+  </Accordion>
+</AccordionGroup>
+
+## Known Issues
+
+<Warning>
+Be aware of these known limitations:
+
+- **Vulkan**: SER and OMM support work in progress
+- **Vulkan Debug Layer**: Shows warnings/errors, fixes in progress  
+- **AMD + Vulkan**: May trigger TDR during TLAS building
+- **AMD Transparency**: Black/incorrect transparencies on some AMD systems with latest drivers (driver bug reported)
+- **Streamline Debug Builds**: LIVE_DEVICE DirectX warnings at shutdown (cosmetic)
+- **PIX Compatibility**: Disable NVAPI and Streamline for PIX usage
+
+Check [GitHub Issues](https://github.com/NVIDIA-RTX/RTXPT/issues) for latest status.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Jump into using the path tracer
+  </Card>
+  <Card title="Command Line Reference" icon="terminal">
+    All command line options (coming soon)
+  </Card>
+  <Card title="Building Custom Scenes" icon="cube">
+    Create and import your own content (coming soon)
+  </Card>
+  <Card title="Developer Guide" icon="code">
+    Extend and integrate the path tracer (coming soon)
+  </Card>
+</CardGroup>
+
+## Support
+
+Need help with installation?
+
+- **GitHub Issues**: [NVIDIA-RTX/RTXPT](https://github.com/NVIDIA-RTX/RTXPT/issues)
+- **Email**: pathtracing-sdk-support@nvidia.com

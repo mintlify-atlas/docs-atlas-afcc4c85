@@ -1,0 +1,260 @@
+---
+title: RTXDI (ReSTIR)
+description: Spatiotemporal reservoir sampling for efficient direct and indirect illumination
+---
+
+## Overview
+
+**RTXDI** (RTX Direct Illumination) is NVIDIA's SDK for implementing ReSTIR (Reservoir-based Spatio-Temporal Importance Resampling) algorithms. RTXPT integrates RTXDI to provide efficient many-light sampling for both direct illumination (ReSTIR DI) and global illumination (ReSTIR GI).
+
+<Info>
+RTXDI enables real-time path tracing with **thousands or even millions** of lights by using advanced reservoir-based importance sampling.
+</Info>
+
+## Features
+
+### ReSTIR DI (Direct Illumination)
+
+Efficient sampling of direct lighting from many light sources:
+
+- **Initial sampling** with light importance and BRDF evaluation
+- **Temporal resampling** reusing previous frame reservoirs
+- **Spatial resampling** sharing samples with neighboring pixels
+- **Bias correction** via ray-traced visibility
+
+From RtxdiApplicationSettings.cpp:15-28:
+```cpp
+ReSTIRDI_InitialSamplingParameters params = {};
+params.brdfCutoff = 0.0001f;
+params.enableInitialVisibility = true;
+params.environmentMapImportanceSampling = 1;
+params.localLightSamplingMode = ReSTIRDI_LocalLightSamplingMode::ReGIR_RIS;
+params.numPrimaryLocalLightSamples = 8;
+```
+
+### ReSTIR GI (Global Illumination)
+
+Extends reservoir sampling to indirect lighting:
+
+- Samples and reuses indirect lighting paths
+- Temporal and spatial resampling for secondary bounces
+- Final visibility and MIS for unbiased results
+
+From RtxdiApplicationSettings.cpp:74-88:
+```cpp
+ReSTIRGI_TemporalResamplingParameters params = {};
+params.boilingFilterStrength = 0.35f;
+params.enableBoilingFilter = true;
+params.maxHistoryLength = 10;
+params.maxReservoirAge = 50;
+params.temporalBiasCorrectionMode = ResTIRGI_TemporalBiasCorrectionMode::Basic;
+```
+
+### ReGIR (Grid-based Sampling)
+
+Optional world-space light sample grid:
+
+```cpp
+// From SampleUI.cpp:84
+m_ui.RTXDI.regir.regirStaticParams.Mode = rtxdi::ReGIRMode::Grid;
+```
+
+ReGIR builds a spatial grid of light samples for even better importance sampling.
+
+## Enabling RTXDI
+
+### In the UI
+
+RTXDI can be enabled under **Path tracer → Light sampling**:
+
+```cpp
+// From SampleUI.cpp:788
+ImGui::Checkbox("Use ReSTIR DI (RTXDI)", &m_ui.UseReSTIRDI);
+ImGui::Checkbox("Use ReSTIR GI (RTXDI)", &m_ui.UseReSTIRGI);
+```
+
+<Warning>
+**ReSTIR DI requires Next Event Estimation (NEE)** to be enabled. It is currently not tuned to work with DLSS-RR.
+</Warning>
+
+### Default Settings
+
+From RtxdiPass.h:42-75, the system uses these structures:
+
+```cpp
+struct RtxdiUserSettings
+{
+    struct {
+        rtxdi::ReSTIRDI_ResamplingMode resamplingMode; // Temporal + Spatial
+        ReSTIRDI_InitialSamplingParameters initialSamplingParams;
+        ReSTIRDI_TemporalResamplingParameters temporalResamplingParams;
+        ReSTIRDI_SpatialResamplingParameters spatialResamplingParams;
+        ReSTIRDI_ShadingParameters shadingParams;
+    } restirDI;
+
+    struct {
+        rtxdi::ReSTIRGI_ResamplingMode resamplingMode;
+        ReSTIRGI_TemporalResamplingParameters temporalResamplingParams;
+        ReSTIRGI_SpatialResamplingParameters spatialResamplingParams;
+        ReSTIRGI_FinalShadingParameters finalShadingParams;
+    } restirGI;
+};
+```
+
+## Configuration Options
+
+### Temporal Resampling
+
+**ReSTIR DI Temporal:**
+```cpp
+params.maxHistoryLength = 20;              // Max frames to accumulate
+params.temporalDepthThreshold = 0.1f;      // Surface similarity
+params.temporalNormalThreshold = 0.5f;     // Normal similarity
+params.enableBoilingFilter = true;          // Reduce temporal noise
+params.boilingFilterStrength = 0.2f;
+params.temporalBiasCorrection = ReSTIRDI_TemporalBiasCorrectionMode::Raytraced;
+```
+
+**ReSTIR GI Temporal:**
+```cpp
+params.maxHistoryLength = 10;              // Shorter for GI
+params.maxReservoirAge = 50;               // Older samples allowed
+params.enableFallbackSampling = true;      // Handle disocclusions
+```
+
+### Spatial Resampling
+
+**ReSTIR DI Spatial:**
+```cpp
+params.numSpatialSamples = 2;              // Neighbors to sample
+params.spatialSamplingRadius = 32.0f;      // Pixel radius
+params.numDisocclusionBoostSamples = 8;    // Extra samples for disocclusions
+params.spatialBiasCorrection = ReSTIRDI_SpatialBiasCorrectionMode::Raytraced;
+```
+
+**ReSTIR GI Spatial:**
+```cpp
+params.numSpatialSamples = 2;
+params.spatialSamplingRadius = 32.0f;
+params.spatialBiasCorrectionMode = ResTIRGI_SpatialBiasCorrectionMode::Basic;
+```
+
+### Shading Parameters
+
+```cpp
+ReSTIRDI_ShadingParameters params = {};
+params.enableFinalVisibility = true;       // Ray-traced shadows
+params.finalVisibilityMaxAge = 4;          // Reuse visibility up to N frames
+params.finalVisibilityMaxDistance = 16.f;  // Max pixel distance for reuse
+params.reuseFinalVisibility = false;       // Conservative default
+```
+
+## Implementation Details
+
+### Pass Structure
+
+From RtxdiPass.h:150-162, the implementation uses multiple compute and ray tracing passes:
+
+```cpp
+ComputePass m_PresampleLightsPass;         // Build light PDF
+ComputePass m_PresampleEnvMapPass;          // Environment map sampling
+ComputePass m_PresampleReGIRPass;           // ReGIR grid generation
+
+RayTracingPass m_GenerateInitialSamplesPass;  // Initial light samples
+RayTracingPass m_TemporalResamplingPass;      // Temporal reuse
+RayTracingPass m_SpatialResamplingPass;       // Spatial reuse
+
+RayTracingPass m_GITemporalResamplingPass;    // GI temporal
+RayTracingPass m_GISpatialResamplingPass;     // GI spatial
+RayTracingPass m_GIFinalShadingPass;          // GI final shading
+
+RayTracingPass m_FusedDIGIFinalShadingPass;   // Combined DI+GI
+```
+
+### Integration with Path Tracer
+
+When RTXDI is enabled, it handles light sampling for the path tracer. From SampleUI.cpp:629:
+
+```cpp
+// ReSTIR DI/GI are incompatible with multiple samples per pixel
+UI_SCOPED_DISABLE(m_ui.ActualUseReSTIRDI() || m_ui.ActualUseReSTIRGI());
+ImGui::InputInt("Samples per pixel", &m_ui.RealtimeSamplesPerPixel);
+```
+
+## Performance Characteristics
+
+### When to Use ReSTIR DI
+
+<Card title="Best Use Cases" icon="lightbulb">
+- Scenes with **100+ lights**
+- Emissive geometry (many triangle lights)
+- Large area lights
+- Environment map lighting
+</Card>
+
+### When to Use ReSTIR GI
+
+<Card title="Best Use Cases" icon="sun">
+- Complex indirect lighting
+- Colored light bounces
+- Interior scenes with light leaking
+- Reducing noise in secondary bounces
+</Card>
+
+### Performance Impact
+
+| Configuration | Frame Time Impact | Quality |
+|--------------|-------------------|----------|
+| **No RTXDI** | Baseline | Noisy with many lights |
+| **ReSTIR DI** | +15-25% | Clean direct lighting |
+| **ReSTIR GI** | +30-50% | Clean indirect lighting |
+| **Both DI+GI** | +40-60% | High quality result |
+
+<Tip>
+Start with **ReSTIR DI only** for the best quality/performance balance. Add ReSTIR GI if indirect lighting noise is problematic.
+</Tip>
+
+## Limitations
+
+<Warning>
+**Current Limitations:**
+- Not tuned to work well with DLSS Ray Reconstruction
+- Incompatible with multiple samples per pixel in realtime mode
+- May introduce bias if not properly configured
+</Warning>
+
+From SampleUI.cpp:792:
+```cpp
+if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("ReSTIR GI (RTXDI) is currently not tuned to work well with DLSS-RR");
+```
+
+## Troubleshooting
+
+### Temporal Lag
+
+If lighting lags behind camera movement:
+- Reduce `maxHistoryLength`
+- Increase `boilingFilterStrength`
+- Enable disocclusion boost samples
+
+### Fireflies/Bright Pixels
+
+If bright pixels appear:
+- Enable `enableBoilingFilter`
+- Use `enableFallbackSampling` for ReSTIR GI
+- Reduce `maxReservoirAge`
+
+### Dark/Missing Lights
+
+If some lights don't contribute:
+- Increase `numPrimaryLocalLightSamples`
+- Check `brdfCutoff` isn't too high
+- Verify light importance sampling is enabled
+
+## See Also
+
+- [NVIDIA RTXDI SDK](https://github.com/NVIDIA-RTX/RTXDI) - Official SDK repository
+- [ReSTIR Paper](https://research.nvidia.com/publication/2020-07_spatiotemporal-reservoir-resampling-real-time-ray-tracing-dynamic-direct) - Original research
+- [NRD Denoising](/features/nrd-denoising) - Complementary denoising for remaining noise
+- [UI Controls](/guides/ui-controls) - Path tracer UI settings and configuration

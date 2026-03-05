@@ -1,0 +1,305 @@
+---
+title: Accumulation Pass
+description: Temporal accumulation for progressive path tracing reference mode
+---
+
+The `AccumulationPass` provides temporal accumulation of path traced frames for progressive refinement in reference mode. It blends new frames with accumulated history to reduce noise over time.
+
+## Overview
+
+Accumulation is essential for reference-quality rendering where the camera is static. The pass:
+- Accumulates samples over multiple frames
+- Supports resolution scaling/upsampling
+- Uses configurable blend weights for control over convergence speed
+- Maintains separate accumulated and output textures
+
+## Class Definition
+
+```cpp
+class AccumulationPass
+{
+public:
+    AccumulationPass(
+        nvrhi::IDevice* device,
+        std::shared_ptr<donut::engine::ShaderFactory> shaderFactory
+    );
+
+    void CreatePipeline();
+    
+    void CreateBindingSet(
+        nvrhi::ITexture* inputTexture,
+        nvrhi::ITexture* outputTexture,
+        nvrhi::ITexture* renderOutputTexture
+    );
+    
+    void Render(
+        nvrhi::ICommandList* commandList,
+        const donut::engine::IView& sourceView,
+        const donut::engine::IView& upscaledView,
+        float accumulationWeight
+    );
+};
+```
+
+Source: `AccumulationPass.h:22-30`
+
+## Accumulation Constants
+
+The shader receives these parameters:
+
+```cpp
+struct AccumulationConstants
+{
+    float2 outputSize;
+    float2 inputSize;
+    float2 inputTextureSizeInv;
+    float2 pixelOffset;
+    float blendFactor;
+};
+```
+
+Source: `ShaderParameters.h:160-167`
+
+### Parameters
+
+- **outputSize** - Output resolution (may differ from input for upsampling)
+- **inputSize** - Input resolution in pixels
+- **inputTextureSizeInv** - `1.0 / textureSize` for UV computation
+- **pixelOffset** - Sub-pixel jitter offset from view
+- **blendFactor** - Blend weight for new frame (0 = keep old, 1 = replace with new)
+
+## Shader Implementation
+
+The accumulation shader handles both matched resolution and upsampling:
+
+```hlsl
+[numthreads(8, 8, 1)]
+void main(uint2 globalIdx : SV_DispatchThreadID)
+{
+    if (any(globalIdx > int2(g_Const.outputSize)))
+        return;
+
+    float4 prevColor = u_AccumulatedColor[globalIdx];
+    float4 compositedColor;
+    
+    // Handle resolution mismatch (upsampling)
+    if (all(g_Const.inputSize == g_Const.outputSize))
+    {
+        compositedColor = t_InputColor[globalIdx];
+    }
+    else
+    {
+        float2 inputPos = (float2(globalIdx) + 0.5) * 
+            (g_Const.inputSize / g_Const.outputSize) + g_Const.pixelOffset;
+        float2 inputUV = inputPos * g_Const.inputTextureSizeInv;
+        
+        compositedColor = t_InputColor.SampleLevel(s_Sampler, inputUV, 0);
+    }
+    
+    // Blend with history
+    float4 outputColor;
+    if (g_Const.blendFactor < 1)
+        outputColor = lerp(prevColor, compositedColor, g_Const.blendFactor);
+    else
+        outputColor = compositedColor;
+
+    // Update accumulated buffer
+    if (g_Const.blendFactor > 0)
+        u_AccumulatedColor[globalIdx] = outputColor;
+    u_OutputColor[globalIdx] = outputColor;
+}
+```
+
+Source: `AccumulationPass.hlsl:25-55`
+
+## Blend Factor Behavior
+
+### Full Accumulation (blendFactor < 1)
+
+Exponential moving average:
+
+```
+outputColor = lerp(prevColor, newColor, blendFactor)
+```
+
+With constant `blendFactor = 1/N`, this gives equal weight to the last N frames.
+
+### Replace Mode (blendFactor = 1)
+
+Completely replaces with new frame:
+
+```
+outputColor = newColor
+```
+
+Useful for camera motion or scene changes.
+
+### Pause Mode (blendFactor = 0)
+
+Keeps previous accumulated result without updating:
+
+```
+outputColor = prevColor  // No new data written to accumulation buffer
+```
+
+## Pipeline Creation
+
+The compute pipeline is created with standard binding layout:
+
+```cpp
+void AccumulationPass::CreatePipeline()
+{
+    m_computeShader = m_shaderFactory->CreateShader(
+        "app/AccumulationPass.hlsl", "main", nullptr, nvrhi::ShaderType::Compute);
+
+    nvrhi::ComputePipelineDesc pipelineDesc;
+    pipelineDesc.bindingLayouts = { m_bindingLayout };
+    pipelineDesc.CS = m_computeShader;
+    m_computePipeline = m_device->createComputePipeline(pipelineDesc);
+}
+```
+
+Source: `AccumulationPass.cpp:44-52`
+
+## Binding Set
+
+Bindings connect input, accumulation buffer, and output:
+
+```cpp
+void AccumulationPass::CreateBindingSet(
+    nvrhi::ITexture* inputTexture,
+    nvrhi::ITexture* outputTexture,
+    nvrhi::ITexture* renderOutputTexture)
+{
+    nvrhi::BindingSetDesc bindingSetDesc;
+    bindingSetDesc.bindings = {
+        nvrhi::BindingSetItem::Texture_SRV(0, inputTexture),
+        nvrhi::BindingSetItem::Texture_UAV(0, outputTexture),           // Accumulated
+        nvrhi::BindingSetItem::Texture_UAV(1, renderOutputTexture),     // Display
+        nvrhi::BindingSetItem::Sampler(0, m_sampler),
+        nvrhi::BindingSetItem::PushConstants(0, sizeof(AccumulationConstants))
+    };
+    m_bindingSet = m_device->createBindingSet(bindingSetDesc, m_bindingLayout);
+}
+```
+
+Source: `AccumulationPass.cpp:54-67`
+
+## Render Execution
+
+The render function computes constants and dispatches:
+
+```cpp
+void AccumulationPass::Render(
+    nvrhi::ICommandList* commandList,
+    const donut::engine::IView& sourceView,
+    const donut::engine::IView& upscaledView,
+    float accumulationWeight)
+{
+    commandList->beginMarker("Accumulation");
+
+    const auto sourceViewport = sourceView.GetViewportState().viewports[0];
+    const auto upscaledViewport = upscaledView.GetViewportState().viewports[0];
+    const auto& inputDesc = m_compositedColor->getDesc();
+
+    AccumulationConstants constants = {};
+    constants.inputSize = float2(sourceViewport.width(), sourceViewport.height());
+    constants.inputTextureSizeInv = float2(
+        1.f / float(inputDesc.width), 1.f / float(inputDesc.height));
+    constants.outputSize = float2(
+        upscaledViewport.width(), upscaledViewport.height());
+    constants.pixelOffset = sourceView.GetPixelOffset();
+    constants.blendFactor = accumulationWeight;
+
+    nvrhi::ComputeState state;
+    state.bindings = { m_bindingSet };
+    state.pipeline = m_computePipeline;
+    commandList->setComputeState(state);
+    commandList->setPushConstants(&constants, sizeof(constants));
+    
+    commandList->dispatch(
+        dm::div_ceil(upscaledView.GetViewExtent().width(), 8), 
+        dm::div_ceil(upscaledView.GetViewExtent().height(), 8), 
+        1);
+
+    commandList->endMarker();
+}
+```
+
+Source: `AccumulationPass.cpp:71-104`
+
+## Usage Example
+
+```cpp
+// Create accumulation pass
+auto accumulation = std::make_shared<AccumulationPass>(device, shaderFactory);
+accumulation->CreatePipeline();
+accumulation->CreateBindingSet(inputTexture, accumulatedTexture, outputTexture);
+
+// Progressive accumulation
+int frameCount = 0;
+while (rendering)
+{
+    // Render new path traced frame to inputTexture
+    // ...
+    
+    // Accumulate with decreasing weight for equal average
+    float weight = 1.0f / (frameCount + 1);
+    accumulation->Render(commandList, sourceView, outputView, weight);
+    
+    frameCount++;
+}
+
+// Reset on camera move
+if (cameraMoved)
+{
+    accumulation->Render(commandList, sourceView, outputView, 1.0f);  // Replace
+    frameCount = 0;
+}
+```
+
+## Upsampling Support
+
+The accumulation pass can upsample during accumulation when input and output resolutions differ:
+
+```hlsl
+// Map output pixel to input UV
+float2 inputPos = (float2(globalIdx) + 0.5) * 
+    (g_Const.inputSize / g_Const.outputSize) + g_Const.pixelOffset;
+float2 inputUV = inputPos * g_Const.inputTextureSizeInv;
+
+// Bilinear sample
+compositedColor = t_InputColor.SampleLevel(s_Sampler, inputUV, 0);
+```
+
+Source: `AccumulationPass.hlsl:40-43`
+
+This allows rendering at lower resolution and accumulating at display resolution for performance.
+
+## Thread Group Size
+
+The shader uses 8x8 thread groups:
+
+```hlsl
+[numthreads(8, 8, 1)]
+void main(uint2 globalIdx : SV_DispatchThreadID)
+```
+
+Source: `AccumulationPass.hlsl:25`
+
+Dispatch size is computed as:
+
+```cpp
+commandList->dispatch(
+    dm::div_ceil(upscaledView.GetViewExtent().width(), 8), 
+    dm::div_ceil(upscaledView.GetViewExtent().height(), 8), 
+    1);
+```
+
+Source: `AccumulationPass.cpp:98-101`
+
+## See Also
+
+- [PostProcess](/api/post-process) - Denoiser integration
+- [Tone Mapper](/api/tone-mapper) - HDR to LDR conversion
+- Progressive Rendering - Reference mode implementation

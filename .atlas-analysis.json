@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "NVIDIA RTX Path Tracing",
+  "projectType": "sdk-library",
+  "projectName": "NVIDIA RTX Path Tracing",
+  "projectDescription": "Real-time path tracing library and sample with DirectX 12 and Vulkan support.",
   "theme": "aspen",
-  "mode": "custom",
-  "colors": {
-    "primary": "#040404",
-    "light": "#7cbc06",
-    "dark": "#bcdc7c"
-  },
-  "logo": {
-    "light": "https://media.brand.dev/7712444e-5ff9-4888-a4f5-8e8ab249b884.png",
-    "dark": "https://media.brand.dev/7712444e-5ff9-4888-a4f5-8e8ab249b884.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/NVIDIA-RTX/RTXPT"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/NVIDIA-RTX/RTXPT"
-    }
-  },
+  "primaryColor": "#040404",
+  "lightColor": "#7cbc06",
+  "darkColor": "#bcdc7c",
   "navigation": {
     "tabs": [
       {
@@ -97,5 +80,29 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "DirectX 12 and Vulkan backends",
+    "Reference and real-time rendering modes",
+    "Shader Execution Reordering (SER)",
+    "RTXDI integration for ReSTIR DI and GI",
+    "Opacity Micromaps (OMM)",
+    "NRD denoiser integration",
+    "DLSS 4.0 support via Streamline",
+    "glTF 2.0 asset pipeline"
+  ],
+  "publicApiSurface": [
+    "Sample class (Sample.h/cpp)",
+    "ExtendedScene class",
+    "RenderTargets class",
+    "PTPipelineBaker class",
+    "PostProcess class",
+    "AccumulationPass class",
+    "Path tracing shaders (PathTracer/)",
+    "Material system (Materials/)",
+    "Lighting system (Lighting/)",
+    "RTXDI integration (RTXDI/)",
+    "NRD integration (NRD/)",
+    "OMM integration (OpacityMicroMap/)"
+  ]
 }

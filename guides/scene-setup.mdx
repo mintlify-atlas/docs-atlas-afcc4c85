@@ -1,0 +1,400 @@
+---
+title: Scene Setup
+description: Learn how to load scenes, configure .scene.json files, and work with the glTF asset pipeline
+---
+
+## Overview
+
+RTX Path Tracing uses a scene file system based on glTF 2.0 with custom extensions. Scenes are defined in `.scene.json` files that reference 3D models, textures, lights, and cameras.
+
+## Scene File Location
+
+Scene files are automatically discovered from the `Assets` folder:
+
+```
+RTXPT/
+├── bin/
+│   └── Rtxpt.exe
+└── Assets/
+    ├── bistro.scene.json
+    ├── programmer-art.scene.json
+    └── ... (other scenes)
+```
+
+<Note>
+The application searches for both `Assets/` and `../Assets/` relative to the executable, allowing flexible deployment.
+</Note>
+
+## Loading Scenes
+
+### From Command Line
+
+Load a specific scene at startup:
+
+```bash
+Rtxpt.exe --scene bistro.scene.json
+```
+
+### From UI
+
+Scenes can be switched at runtime using the **Scene** dropdown in the UI:
+
+1. Launch the application
+2. Click the **Scene** dropdown at the top
+3. Select a different scene
+4. The scene will reload automatically
+
+### Programmatic Loading
+
+From the source code (`Sample.cpp:404`):
+
+```cpp
+// Get all scenes in "assets" folder
+const std::string mediaExt = ".scene.json";
+for (const auto& file : std::filesystem::directory_iterator(GetLocalPath(c_AssetsFolder)))
+{
+    if (!file.is_regular_file()) continue;
+    std::string fileName = file.path().filename().string();
+    std::string longExt = (fileName.size()<=mediaExt.length())?(""):(fileName.substr(fileName.length()-mediaExt.length()));
+    if ( longExt == mediaExt )
+        m_sceneFilesAvailable.push_back( file.path().filename().string() );
+}
+```
+
+## Scene File Format
+
+### Basic Structure
+
+A `.scene.json` file is based on glTF 2.0 format with custom extensions:
+
+```json
+{
+  "Graph": [
+    {
+      "name": "Scene Root",
+      "children": [
+        // Meshes, cameras, lights go here
+      ]
+    }
+  ],
+  "Settings": {
+    // Optional: scene-specific settings
+  }
+}
+```
+
+### Supported glTF Features
+
+RTX Path Tracing supports a subset of glTF 2.0 features:
+
+- ✅ **Meshes** - Triangle geometry with materials
+- ✅ **Materials** - PBR metallic-roughness workflow
+- ✅ **Textures** - Base color, normal, metallic-roughness, emissive
+- ✅ **Animations** - Skeletal and node animations
+- ✅ **Cameras** - Perspective cameras
+- ✅ **Lights** - Point, directional, spot lights
+- ✅ **Skinning** - Skeletal mesh animation
+- ✅ **Transforms** - Translation, rotation, scale
+
+## Asset Pipeline
+
+### glTF 2.0 Support
+
+The scene system is based on glTF 2.0, providing:
+
+- **Industry standard format** - Compatible with Blender, Maya, 3ds Max
+- **Physically-based materials** - PBR workflow
+- **Animation support** - Node and skeletal animations
+- **Extensibility** - Custom extensions for advanced features
+
+From the README:
+> "Simple asset pipeline based on glTF 2.0 (support for a subset of glTF extensions including animation)"
+
+### Texture Formats
+
+Supported texture formats:
+
+- **PNG** - Lossless, supports alpha
+- **JPEG** - Compressed, no alpha
+- **DDS** - Compressed, GPU-native formats (BC1-BC7)
+- **EXR** - High dynamic range
+- **HDR** - High dynamic range
+
+<Warning>
+**Uncompressed Textures**: If the scene contains uncompressed textures, a warning will appear in the UI with an option to batch compress them using `nvtt_export.exe`.
+</Warning>
+
+### Texture Compression
+
+For optimal performance, compress textures to DDS format:
+
+1. Launch the application
+2. Load a scene
+3. If uncompressed textures are detected, the UI will show:
+   - "Scene has X uncompressed textures"
+   - **Button**: "Batch compress with nvtt_export.exe"
+4. Click the button to compress all textures
+5. Reload the scene
+
+From `SampleUI.cpp:348`:
+```cpp
+if (uncompressedTextureCount > 0)
+{
+    ImGui::TextColored(warnColor, "Scene has %d uncompressed textures", uncompressedTextureCount);
+    if (ImGui::Button("Batch compress with nvtt_export.exe", { -1, 0 }))
+        if (CompressTextures(m_app.GetUncompressedTextures()))
+        {   // reload scene
+            m_app.SetCurrentScene(m_app.GetCurrentSceneName(), true);
+        }
+}
+```
+
+## Cameras
+
+### Camera Node Format
+
+Define cameras in the scene graph:
+
+```json
+{
+  "name": "Cameras",
+  "children": [
+    {
+      "name": "Default",
+      "type": "PerspectiveCameraEx",
+      "translation": [0.0, 1.8, 5.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "verticalFov": 1.047,
+      "zNear": 0.001,
+      "enableAutoExposure": true,
+      "exposureCompensation": 2.0,
+      "exposureValue": 0.0
+    }
+  ]
+}
+```
+
+### Camera Properties
+
+- `translation` - [x, y, z] world position
+- `rotation` - [x, y, z, w] quaternion
+- `verticalFov` - Vertical field of view in radians
+- `zNear` - Near clipping plane
+- `enableAutoExposure` - Enable auto exposure (boolean)
+- `exposureCompensation` - Exposure bias
+- `exposureValue` - Manual exposure value
+- `exposureValueMin` - Min auto exposure value
+- `exposureValueMax` - Max auto exposure value
+
+### Saving Camera Position
+
+Save the current camera view to `campos.txt`:
+
+1. Position camera in 3D view
+2. In UI: **Camera → Save**
+3. A `campos.txt` file is created with:
+   - Camera position, direction, up vector
+   - JSON node definition ready to paste into `.scene.json`
+
+From `Sample.cpp:881`:
+```cpp
+void Sample::SaveCurrentCamera()
+{
+    // ... saves to campos.txt with JSON camera node
+}
+```
+
+## Lights
+
+### Supported Light Types
+
+From README features:
+> "Support for analytic lights (directional, spot, point), emissive triangles and environment map lighting"
+
+**Available light types:**
+
+1. **Point Lights** - Omnidirectional point sources
+2. **Spot Lights** - Directional cone lights
+3. **Directional Lights** - Infinite distance sun lights
+4. **Emissive Meshes** - Triangle-based area lights
+5. **Environment Maps** - IBL from HDR images
+
+### Light Properties
+
+Lights are defined in the scene graph and processed at load time:
+
+```cpp
+// From Sample.cpp:555
+// Find lights; do this before special cases to avoid duplicates
+for (auto light : m_scene->GetSceneGraph()->GetLights())
+{
+    m_lights.push_back(light);
+}
+```
+
+### Environment Maps
+
+Environment maps provide image-based lighting:
+
+**Supported formats:**
+- `.exr` - High dynamic range
+- `.hdr` - High dynamic range
+- `.dds` - Compressed HDR
+
+Environment maps are auto-discovered from `Assets/envmaps/` folder:
+
+```cpp
+// From Sample.cpp:154
+m_envMapMediaFolder = GetLocalPath(c_AssetsFolder) / c_EnvMapSubFolder;
+for (const auto& file : std::filesystem::directory_iterator(m_envMapMediaFolder))
+{
+    if (!file.is_regular_file()) continue;
+    if (file.path().extension() == ".exr" || file.path().extension() == ".hdr" || file.path().extension() == ".dds")
+        m_envMapMediaList.push_back(file.path());
+}
+```
+
+## Materials
+
+### BSDF Model
+
+From README:
+> "Simple BSDF model that is easy(ish) to extend"
+
+### Material Features
+
+- **PBR workflow** - Metallic-roughness
+- **Texture support** - All standard PBR maps
+- **Emissive materials** - For area lights
+- **Nested dielectrics** - With priority system
+- **Volumes** - Volumetric scattering
+
+### Texture MIP Selection
+
+From README:
+> "Use of [RayCones](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) for texture MIP selection"
+
+## Animations
+
+### Enabling Animations
+
+Animations can be enabled:
+
+1. **Via UI**: Check "Enable animations" (requires Realtime Mode)
+2. **Via Scene Settings**: Set in `.scene.json`
+
+```json
+{
+  "Settings": {
+    "enableAnimations": true,
+    "realtimeMode": true
+  }
+}
+```
+
+### Animation Types
+
+- **Skeletal animations** - Skinned mesh deformation
+- **Node animations** - Transform animations
+- **Dynamic lighting** - Animated lights
+
+<Note>
+Animations are only available in Realtime Mode. They are disabled in Reference Mode for deterministic rendering.
+</Note>
+
+## Scene Settings
+
+### Optional Settings Node
+
+Configure scene-specific defaults in `.scene.json`:
+
+```json
+{
+  "Settings": {
+    "realtimeMode": true,
+    "enableAnimations": false,
+    "enableReSTIRDI": false,
+    "enableReSTIRGI": false,
+    "startingCamera": 0,
+    "maxBounces": 8,
+    "realtimeMaxDiffuseBounces": 3,
+    "referenceMaxDiffuseBounces": 8,
+    "textureMIPBias": 0.0,
+    "realtimeFireflyFilter": 0.001
+  }
+}
+```
+
+### Available Settings
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `realtimeMode` | boolean | Start in realtime vs reference mode |
+| `enableAnimations` | boolean | Enable animations on load |
+| `enableReSTIRDI` | boolean | Enable ReSTIR DI (direct illumination) |
+| `enableReSTIRGI` | boolean | Enable ReSTIR GI (global illumination) |
+| `startingCamera` | integer | Camera index to use (0-based) |
+| `maxBounces` | integer | Maximum path bounces |
+| `realtimeMaxDiffuseBounces` | integer | Max diffuse bounces in realtime |
+| `referenceMaxDiffuseBounces` | integer | Max diffuse bounces in reference |
+| `textureMIPBias` | float | Texture LOD bias |
+| `realtimeFireflyFilter` | float | Firefly filter threshold |
+
+## Togglable Scene Elements
+
+Nodes with `_togglable` suffix can be enabled/disabled at runtime:
+
+```json
+{
+  "name": "lighting_rig_togglable",
+  "children": [
+    // Lights or meshes that can be toggled
+  ]
+}
+```
+
+These appear in the UI under **Scene → Togglables**.
+
+## Performance Optimization
+
+### Acceleration Structures
+
+The scene uses ray tracing acceleration structures:
+
+- **BLAS** (Bottom-Level) - Per-mesh geometry
+- **TLAS** (Top-Level) - Scene instance hierarchy
+
+<Note>
+Acceleration structures are automatically rebuilt when the scene changes or when toggling scene elements.
+</Note>
+
+### Opacity Micromaps (OMM)
+
+From README:
+> "[OMM](https://github.com/NVIDIA-RTX/OMM) integration for fast ray traced alpha testing"
+
+OMMs accelerate rendering of alpha-tested geometry (foliage, fences, etc.).
+
+## Example Scenes
+
+RTX Path Tracing includes several demo scenes:
+
+### bistro-programmer-art.scene.json
+
+From README (v1.7.0 features):
+> "New scene (bistro-programmer-art) for stress testing animation and dynamic lighting scenarios"
+
+### Available in Releases
+
+Check the [GitHub Releases](https://github.com/NVIDIA-RTX/RTXPT/releases) for downloadable scene packages.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="UI Controls" icon="sliders" href="/guides/ui-controls">
+    Learn about the user interface and controls
+  </Card>
+  <Card title="Command Line" icon="terminal" href="/guides/command-line">
+    Command-line options for scene loading
+  </Card>
+</CardGroup>

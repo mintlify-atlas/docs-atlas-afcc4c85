@@ -1,0 +1,442 @@
+---
+title: "ExtendedScene Class"
+description: "Scene management class that extends Donut's scene system with custom types and asset loading"
+---
+
+## Overview
+
+The `ExtendedScene` class extends the Donut engine's `Scene` class to provide custom scene graph node types, material extensions, and scene-specific settings. It handles loading scene files, processing custom node types, and managing scene-specific configurations.
+
+**Source:** `~/workspace/source/Rtxpt/ExtendedScene.h`, `~/workspace/source/Rtxpt/ExtendedScene.cpp`
+
+## Class Declaration
+
+```cpp
+class ExtendedScene : public donut::engine::Scene
+{
+public:
+    using Scene::Scene;
+    
+    bool LoadWithThreadPool(const std::filesystem::path& sceneFileName, 
+                            donut::engine::ThreadPool* threadPool) override;
+    
+    std::shared_ptr<SampleSettings> GetSampleSettingsNode() const;
+    std::shared_ptr<GameSettings> GetGameSettingsNode() const;
+    
+    const std::vector<donut::engine::SceneImportResult>& GetModels() const;
+
+private:
+    std::shared_ptr<SampleSettings> m_loadedSettings = nullptr;
+    std::shared_ptr<GameSettings>   m_loadedGameSettings = nullptr;
+    
+    void ProcessNodesRecursive(donut::engine::SceneGraphNode* node);
+};
+```
+
+## Scene Loading
+
+### LoadWithThreadPool
+
+Loads a scene file with multi-threaded asset loading.
+
+```cpp
+bool LoadWithThreadPool(const std::filesystem::path& sceneFileName,
+                        donut::engine::ThreadPool* threadPool) override;
+```
+
+<ParamField path="sceneFileName" type="std::filesystem::path" required>
+  Path to the `.scene.json` file to load
+</ParamField>
+
+<ParamField path="threadPool" type="donut::engine::ThreadPool*" required>
+  Thread pool for parallel asset loading
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if the scene loads successfully, `false` otherwise
+</ResponseField>
+
+```cpp ExtendedScene.cpp:145
+bool ExtendedScene::LoadWithThreadPool(
+    const std::filesystem::path& sceneFileName, 
+    donut::engine::ThreadPool* threadPool)
+{
+    if (!Scene::LoadWithThreadPool(sceneFileName, threadPool))
+        return false;
+    
+    // Process all nodes to find custom types
+    ProcessNodesRecursive(GetSceneGraph()->GetRootNode().get());
+    
+    // Apply post-load material modifications
+    auto& materials = m_SceneGraph->GetMaterials();
+    for(auto it : materials)
+    {
+        Material& mat = *it;
+        LocalConfig::PostMaterialLoad(mat);
+    }
+    
+    return true;
+}
+```
+
+### ProcessNodesRecursive
+
+Recursively processes scene graph nodes to identify and handle custom node types.
+
+```cpp
+private:
+void ProcessNodesRecursive(donut::engine::SceneGraphNode* node);
+```
+
+```cpp ExtendedScene.cpp:89
+void ExtendedScene::ProcessNodesRecursive(donut::engine::SceneGraphNode* node)
+{
+    if (node->GetLeaf() != nullptr)
+    {
+        // Check for SampleSettings
+        std::shared_ptr<SampleSettings> sampleSettings = 
+            std::dynamic_pointer_cast<SampleSettings>(node->GetLeaf());
+        if (sampleSettings != nullptr)
+        {
+            assert(m_loadedSettings == nullptr);
+            m_loadedSettings = sampleSettings;
+        }
+        
+        // Check for GameSettings
+        std::shared_ptr<GameSettings> gameSettings = 
+            std::dynamic_pointer_cast<GameSettings>(node->GetLeaf());
+        if (gameSettings != nullptr)
+        {
+            assert(m_loadedGameSettings == nullptr);
+            m_loadedGameSettings = gameSettings;
+        }
+    }
+    
+    // Recursively process children
+    for(int i = (int)node->GetNumChildren()-1; i >= 0; i--)
+        ProcessNodesRecursive(node->GetChild(i));
+}
+```
+
+## Scene Settings Access
+
+### GetSampleSettingsNode
+
+Retrieves the sample-specific settings from the loaded scene.
+
+```cpp
+std::shared_ptr<SampleSettings> GetSampleSettingsNode() const;
+```
+
+<ResponseField name="return" type="std::shared_ptr<SampleSettings>">
+  Shared pointer to sample settings, or `nullptr` if no settings were specified in the scene
+</ResponseField>
+
+### GetGameSettingsNode
+
+Retrieves game-specific settings from the loaded scene.
+
+```cpp
+std::shared_ptr<GameSettings> GetGameSettingsNode() const;
+```
+
+<ResponseField name="return" type="std::shared_ptr<GameSettings>">
+  Shared pointer to game settings, or `nullptr` if no game settings were specified
+</ResponseField>
+
+### GetModels
+
+Returns the list of imported models.
+
+```cpp
+const std::vector<donut::engine::SceneImportResult>& GetModels() const;
+```
+
+<ResponseField name="return" type="const std::vector<donut::engine::SceneImportResult>&">
+  Reference to vector of imported scene models
+</ResponseField>
+
+## Custom Scene Node Types
+
+### EnvironmentLight
+
+Represents an environment light with HDR texture mapping.
+
+```cpp
+class EnvironmentLight : public donut::engine::Light
+{
+public:
+    dm::float3 radianceScale = 1.f;
+    int textureIndex = -1;
+    float rotation = 0.f;
+    std::string path;
+    
+    void Load(const Json::Value& node) override;
+    int GetLightType() const override { return LightType_Environment; }
+    std::shared_ptr<SceneGraphLeaf> Clone() override;
+};
+```
+
+<ParamField path="radianceScale" type="dm::float3">
+  RGB scaling factor for environment map radiance
+</ParamField>
+
+<ParamField path="textureIndex" type="int">
+  Index of the environment map texture in the texture array
+</ParamField>
+
+<ParamField path="rotation" type="float">
+  Rotation angle of the environment map in radians
+</ParamField>
+
+<ParamField path="path" type="std::string">
+  File path to the environment map image (`.exr` or `.hdr`)
+</ParamField>
+
+```cpp ExtendedScene.cpp:41
+void EnvironmentLight::Load(const Json::Value& node)
+{
+    node["radianceScale"] >> radianceScale;
+    node["textureIndex"] >> textureIndex;
+    node["rotation"] >> rotation;
+    node["path"] >> path;
+}
+```
+
+### PerspectiveCameraEx
+
+Extended perspective camera with exposure control.
+
+```cpp
+class PerspectiveCameraEx : public donut::engine::PerspectiveCamera
+{
+public:
+    std::optional<bool>  enableAutoExposure;
+    std::optional<float> exposureCompensation;
+    std::optional<float> exposureValue;
+    std::optional<float> exposureValueMin;
+    std::optional<float> exposureValueMax;
+    
+    std::shared_ptr<SceneGraphLeaf> Clone() override;
+    void Load(const Json::Value& node) override;
+};
+```
+
+<ParamField path="enableAutoExposure" type="std::optional<bool>">
+  Enables automatic exposure adjustment
+</ParamField>
+
+<ParamField path="exposureCompensation" type="std::optional<float>">
+  Exposure compensation in EV stops (typically -2.0 to +2.0)
+</ParamField>
+
+<ParamField path="exposureValue" type="std::optional<float>">
+  Manual exposure value in EV units
+</ParamField>
+
+<ParamField path="exposureValueMin" type="std::optional<float>">
+  Minimum auto-exposure value
+</ParamField>
+
+<ParamField path="exposureValueMax" type="std::optional<float>">
+  Maximum auto-exposure value
+</ParamField>
+
+```cpp ExtendedScene.cpp:198
+void PerspectiveCameraEx::Load(const Json::Value& node)
+{
+    node["enableAutoExposure"] >> enableAutoExposure;
+    node["exposureCompensation"] >> exposureCompensation;
+    node["exposureValue"] >> exposureValue;
+    node["exposureValueMin"] >> exposureValueMin;
+    node["exposureValueMax"] >> exposureValueMax;
+    
+    PerspectiveCamera::Load(node);
+}
+```
+
+### SampleSettings
+
+Scene-specific sample settings that override default configuration.
+
+```cpp
+class SampleSettings : public donut::engine::SceneGraphLeaf
+{
+public:
+    std::optional<bool>  realtimeMode;
+    std::optional<bool>  enableAnimations;
+    std::optional<bool>  enableReSTIRDI;
+    std::optional<bool>  enableReSTIRGI;
+    std::optional<int>   startingCamera;
+    std::optional<float> realtimeFireflyFilter;
+    std::optional<int>   maxBounces;
+    std::optional<int>   realtimeMaxDiffuseBounces;
+    std::optional<int>   referenceMaxDiffuseBounces;
+    std::optional<float> textureMIPBias;
+    
+    std::shared_ptr<SceneGraphLeaf> Clone() override;
+    void Load(const Json::Value& node) override;
+};
+```
+
+```cpp ExtendedScene.cpp:222
+void SampleSettings::Load(const Json::Value& node)
+{
+    node["realtimeMode"] >> realtimeMode;
+    node["enableAnimations"] >> enableAnimations;
+    node["enableReSTIRDI"] >> enableReSTIRDI;
+    node["enableReSTIRGI"] >> enableReSTIRGI;
+    node["startingCamera"] >> startingCamera;
+    node["realtimeFireflyFilter"] >> realtimeFireflyFilter;
+    node["maxBounces"] >> maxBounces;
+    node["realtimeMaxDiffuseBounces"] >> realtimeMaxDiffuseBounces;
+    node["referenceMaxDiffuseBounces"] >> referenceMaxDiffuseBounces;
+    node["textureMIPBias"] >> textureMIPBias;
+}
+```
+
+### GameSettings
+
+Game-specific settings stored as JSON data.
+
+```cpp
+class GameSettings : public donut::engine::SceneGraphLeaf
+{
+public:
+    const std::string GetJsonData() const;
+    
+    std::shared_ptr<SceneGraphLeaf> Clone() override;
+    void Load(const Json::Value& node) override;
+    
+private:
+    std::string jsonData;
+};
+```
+
+```cpp ExtendedScene.cpp:243
+void GameSettings::Load(const Json::Value& node)
+{
+    Json::StreamWriterBuilder writer;
+    jsonData = Json::writeString(writer, node);
+}
+```
+
+## ExtendedSceneTypeFactory
+
+Factory class for creating custom scene node types.
+
+```cpp
+class ExtendedSceneTypeFactory : public donut::engine::SceneTypeFactory
+{
+public:
+    std::shared_ptr<donut::engine::SceneGraphLeaf> 
+        CreateLeaf(const std::string& type) override;
+    std::shared_ptr<donut::engine::Material> CreateMaterial() override;
+    std::shared_ptr<donut::engine::MeshInfo> CreateMesh() override;
+    std::shared_ptr<donut::engine::MeshGeometry> CreateMeshGeometry() override;
+};
+```
+
+### CreateLeaf
+
+Creates custom scene graph leaf nodes based on type.
+
+```cpp ExtendedScene.cpp:48
+std::shared_ptr<donut::engine::SceneGraphLeaf> 
+ExtendedSceneTypeFactory::CreateLeaf(const std::string& type)
+{
+    if (type == "EnvironmentLight")
+        return std::make_shared<EnvironmentLight>();
+    else if (type == "PerspectiveCamera" || type == "PerspectiveCameraEx")
+        return std::make_shared<PerspectiveCameraEx>();
+    else if (type == "SampleSettings")
+        return std::make_shared<SampleSettings>();
+    else if (type == "GameSettings")
+        return std::make_shared<GameSettings>();
+    
+    return SceneTypeFactory::CreateLeaf(type);
+}
+```
+
+## Utility Functions
+
+### FindEnvironmentLight
+
+Finds the environment light in a list of lights.
+
+```cpp
+std::shared_ptr<EnvironmentLight> 
+FindEnvironmentLight(std::vector<std::shared_ptr<donut::engine::Light>> lights);
+```
+
+```cpp ExtendedScene.cpp:164
+std::shared_ptr<EnvironmentLight> 
+FindEnvironmentLight(std::vector<std::shared_ptr<donut::engine::Light>> lights)
+{
+    for (auto light : lights)
+    {
+        if (light->GetLightType() == LightType_Environment)
+            return std::dynamic_pointer_cast<EnvironmentLight>(light);
+    }
+    return nullptr;
+}
+```
+
+## Usage Example
+
+```cpp
+// Create extended scene with custom type factory
+auto scene = std::make_shared<ExtendedScene>(
+    device, shaderFactory, fileSystem, textureCache, 
+    descriptorTable, std::make_shared<ExtendedSceneTypeFactory>());
+
+// Load scene file
+if (scene->LoadWithThreadPool("bistro.scene.json", threadPool))
+{
+    // Access custom settings if present
+    if (auto settings = scene->GetSampleSettingsNode())
+    {
+        bool realtimeMode = settings->realtimeMode.value_or(false);
+        int maxBounces = settings->maxBounces.value_or(8);
+    }
+    
+    // Find environment light
+    auto lights = scene->GetSceneGraph()->GetLights();
+    if (auto envLight = FindEnvironmentLight(lights))
+    {
+        std::string envMapPath = envLight->path;
+        float rotation = envLight->rotation;
+    }
+}
+```
+
+## Scene JSON Format Example
+
+```json
+{
+  "Graph": [
+    {
+      "name": "Settings",
+      "type": "SampleSettings",
+      "realtimeMode": true,
+      "maxBounces": 8,
+      "enableReSTIRDI": true
+    },
+    {
+      "name": "EnvLight",
+      "type": "EnvironmentLight",
+      "path": "sunset.exr",
+      "radianceScale": [1.0, 1.0, 1.0],
+      "rotation": 0.0
+    },
+    {
+      "name": "Camera",
+      "type": "PerspectiveCameraEx",
+      "translation": [0, 1.8, 0],
+      "verticalFov": 1.047,
+      "enableAutoExposure": true,
+      "exposureCompensation": 2.0
+    }
+  ]
+}
+```

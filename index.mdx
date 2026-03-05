@@ -1,97 +1,190 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "NVIDIA RTX Path Tracing"
+description: "Real-time path tracing library and sample with ray tracing acceleration and neural graphics"
 ---
 
-## Setting up
+<div className="relative overflow-hidden bg-black dark:bg-[#0f1117] py-20">
+  <div className="absolute inset-0 bg-gradient-to-br from-[#7cbc06]/10 via-black/50 to-black/90"></div>
+  <div className="relative max-w-7xl mx-auto px-6 lg:px-8">
+    <div className="grid lg:grid-cols-2 gap-12 items-center">
+      <div>
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-6">
+          Real-Time Path Tracing with NVIDIA RTX
+        </h1>
+        <p className="text-lg sm:text-xl text-gray-300 dark:text-gray-400 max-w-2xl mb-8">
+          Production-ready path tracing library with DirectX 12 and Vulkan support. Integrate years of ray tracing and neural graphics research into your applications.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-4 flex-wrap">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-black bg-[#7AC142] hover:bg-[#8BC53F] transition-colors no-underline"
+          >
+            Get Started
+          </a>
+          <a 
+            href="/introduction" 
+            className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-[#7AC142] bg-transparent border border-[#7AC142]/30 hover:border-[#7AC142] hover:bg-[#7AC142]/10 transition-colors no-underline"
+          >
+            Explore Documentation
+          </a>
+        </div>
+      </div>
+      <div className="hidden lg:block">
+        <div className="relative">
+          <div className="absolute inset-0 bg-gradient-to-tr from-[#7cbc06]/20 to-transparent blur-3xl"></div>
+          <div className="relative bg-[#1a1d27] dark:bg-[#1a1d27] p-8 border border-[#27272a] dark:border-[#27272a]">
+            <div className="space-y-2 font-mono text-sm">
+              <div className="text-[#7cbc06]">// Initialize path tracer</div>
+              <div className="text-gray-300">Sample rtxpt;</div>
+              <div className="text-gray-300">rtxpt.<span className="text-[#bcdc7c]">SetRenderMode</span>(</div>
+              <div className="text-gray-300 ml-4">RenderMode::<span className="text-[#7cbc06]">RealtimePathTracing</span></div>
+              <div className="text-gray-300">);</div>
+              <div className="text-gray-300 mt-4">rtxpt.<span className="text-[#bcdc7c]">EnableFeature</span>(</div>
+              <div className="text-gray-300 ml-4">Feature::<span className="text-[#7cbc06]">DLSS</span> | Feature::<span className="text-[#7cbc06]">RTXDI</span></div>
+              <div className="text-gray-300">);</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Quick Start</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Get RTXPT running in your environment in minutes
+  </p>
+  
+  <Steps>
+    <Step title="Clone the repository">
+      Clone the repository with all submodules recursively:
+      
+      ```bash
+      git clone --recursive https://github.com/NVIDIA-RTX/RTXPT.git
+      cd RTXPT
+      ```
+    </Step>
+    
+    <Step title="Configure with CMake">
+      Generate the build files using CMake:
+      
+      ```bash
+      cmake CMakeLists.txt -B ./build
+      ```
+      
+      <Note>Ensure you're using Visual Studio 2022 with Windows 10 SDK version 10.0.20348.0 or later.</Note>
+    </Step>
+    
+    <Step title="Build and run">
+      Open the generated solution and build the Rtxpt project:
+      
+      ```bash
+      # Build in Visual Studio or via command line
+      cmake --build ./build --config Release
+      
+      # Run the sample
+      ./bin/Rtxpt.exe
+      ```
+      
+      The application will launch with the default scene. Use W/A/S/D to navigate and drag with the left mouse button to rotate the camera.
+    </Step>
+  </Steps>
+</div>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore Features</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Cutting-edge ray tracing and neural rendering technologies
+  </p>
+  
+  <CardGroup cols={3}>
+    <Card title="Shader Execution Reordering" icon="microchip" href="/features/shader-execution-reordering">
+      Boost shader performance with SER for significant frame rate improvements
+    </Card>
+    <Card title="RTXDI Integration" icon="lightbulb" href="/features/rtxdi">
+      ReSTIR DI and ReSTIR GI for advanced light importance sampling
+    </Card>
+    <Card title="DLSS 4.0 Support" icon="wand-magic-sparkles" href="/features/dlss-integration">
+      Upscaling, ray reconstruction, anti-aliasing, and multi-frame generation
+    </Card>
+    <Card title="NRD Denoising" icon="filter" href="/features/nrd-denoising">
+      ReLAX and ReBLUR denoisers with 3-layer path space decomposition
+    </Card>
+    <Card title="Opacity Micromaps" icon="grid" href="/features/opacity-micromaps">
+      Fast ray-traced alpha testing with OMM integration
+    </Card>
+    <Card title="Texture Filtering" icon="sparkles" href="/features/texture-filtering">
+      Stochastic texture filtering with RTXTF for photorealistic materials
+    </Card>
+  </CardGroup>
+</div>
 
-## Make it yours
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Core Capabilities</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Everything you need for production path tracing
+  </p>
+  
+  <CardGroup cols={2}>
+    <Card title="Multi-API Support" icon="layer-group" href="/concepts/architecture">
+      Native DirectX 12 and Vulkan backends for maximum compatibility
+    </Card>
+    <Card title="Reference & Real-time Modes" icon="gauge-high" href="/concepts/rendering-modes">
+      Switch between high-quality reference and interactive real-time rendering
+    </Card>
+    <Card title="glTF 2.0 Pipeline" icon="cube" href="/guides/scene-setup">
+      Complete asset pipeline with animation and material extensions support
+    </Card>
+    <Card title="Advanced Lighting" icon="sun" href="/api/path-tracer/lighting">
+      Analytic lights, emissive triangles, environment maps, and NEE sampling
+    </Card>
+  </CardGroup>
+</div>
 
-Design a docs site that looks great and empowers your users.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Developer Resources</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Documentation, guides, and community support
+  </p>
+  
+  <CardGroup cols={2}>
+    <Card title="Building from Source" icon="hammer" href="/guides/building-from-source">
+      Complete build instructions for Windows with Visual Studio
+    </Card>
+    <Card title="API Reference" icon="code" href="/api/sample">
+      Detailed documentation of core classes and shader interfaces
+    </Card>
+    <Card title="Vulkan Setup" icon="vial" href="/guides/vulkan-setup">
+      Enable Vulkan support and configure the SDK
+    </Card>
+    <Card title="UI & Command Line" icon="terminal" href="/guides/command-line">
+      Control rendering parameters via UI and command-line options
+    </Card>
+  </CardGroup>
+</div>
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
-
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-[#000000] dark:bg-[#1a1d27] border border-[#27272a] dark:border-[#27272a] p-8 lg:p-12">
+    <div className="max-w-3xl">
+      <h2 className="text-3xl font-bold text-white mb-4">Ready to integrate path tracing?</h2>
+      <p className="text-lg text-gray-300 dark:text-gray-400 mb-6">
+        Start building with NVIDIA RTX Path Tracing today. Explore the quickstart guide or dive into the API reference.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-4">
+        <a 
+          href="/quickstart" 
+          className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-black bg-[#7AC142] hover:bg-[#8BC53F] transition-colors no-underline"
+        >
+          View Quickstart
+        </a>
+        <a 
+          href="https://github.com/NVIDIA-RTX/RTXPT" 
+          className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-[#7AC142] bg-transparent border border-[#7AC142]/30 hover:border-[#7AC142] hover:bg-[#7AC142]/10 transition-colors no-underline"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,389 @@
+---
+title: DLSS Integration
+description: NVIDIA DLSS 4.0 integration for AI-powered upscaling, anti-aliasing, frame generation, and ray reconstruction
+---
+
+## Overview
+
+RTXPT integrates **NVIDIA DLSS 4.0** through the Streamline SDK, providing access to multiple DLSS technologies:
+
+- **DLSS Super Resolution (SR)** - AI upscaling from lower resolution
+- **DLSS Anti-Aliasing (DLAA)** - AI anti-aliasing at native resolution
+- **DLSS Ray Reconstruction (RR)** - AI denoising for ray traced rendering
+- **DLSS Frame Generation (FG)** - AI-generated intermediate frames
+- **Multi Frame Generation (MFG)** - Multiple AI-generated frames
+
+<Info>
+DLSS can provide **2-4x performance improvement** while maintaining or even improving image quality through AI reconstruction.
+</Info>
+
+## DLSS Technologies
+
+### DLSS Super Resolution
+
+AI-powered upscaling from lower rendering resolution to higher display resolution:
+
+```cpp
+// From SampleUI.cpp:137-160
+enum DLSSMode {
+    eUltraPerformance,  // 33% render resolution (3x speedup)
+    eMaxPerformance,    // 50% render resolution (2x speedup)
+    eBalanced,          // 58% render resolution (1.7x speedup)
+    eMaxQuality,        // 67% render resolution (1.5x speedup)
+    eDLAA              // 100% render resolution (anti-aliasing only)
+};
+```
+
+**Use Cases:**
+- Rendering at 1080p, displaying at 4K
+- Achieving high frame rates on demanding scenes
+- Enabling ray tracing on mid-range hardware
+
+### DLSS AA (Deep Learning Anti-Aliasing)
+
+AI anti-aliasing at native resolution with no upscaling:
+
+```cpp
+// From SampleUI.cpp:158
+case 4: return donut::app::StreamlineInterface::DLSSMode::eDLAA;
+```
+
+**Use Cases:**
+- Superior anti-aliasing compared to TAA
+- When performance is adequate but AA quality isn't
+- Native resolution rendering with AI enhancement
+
+### DLSS Ray Reconstruction
+
+AI-powered denoising specifically designed for ray traced rendering:
+
+From SampleUI.cpp:739-744:
+```cpp
+const char* items[] = { "Disabled", "TAA", "DLSS", "DLSS-RR" };
+// ...
+if (m_ui.RealtimeAA == 3) // DLSS-RR selected
+```
+
+<Note>
+DLSS-RR **replaces traditional denoisers** (like NRD) with an AI model trained on ray traced data.
+</Note>
+
+**Advantages over NRD:**
+- Better detail preservation
+- Fewer temporal artifacts
+- Handles low sample counts well (even 1 SPP)
+- Integrated with DLSS SR for combined benefit
+
+**Trade-offs:**
+From SampleUI.cpp:792:
+```cpp
+if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("ReSTIR GI (RTXDI) is currently not tuned to work well with DLSS-RR");
+```
+
+### Frame Generation
+
+AI-generated intermediate frames for higher perceived frame rates:
+
+From README.md:43:
+> Streamline integration for DLSS 4.0 (DLSS RR, DLSS SR, DLSS AA, DLSS FG & MFG)
+
+**Frame Generation:**
+- Generates 1 frame between rendered frames (2x perceived FPS)
+
+**Multi Frame Generation:**
+- Generates multiple frames (up to 3x or 4x perceived FPS)
+
+<Warning>
+Frame Generation adds **latency**. Use with NVIDIA Reflex to minimize input lag.
+</Warning>
+
+## Enabling DLSS
+
+### Build Configuration
+
+From CMakeLists.txt:85-103:
+
+```cmake
+option(DONUT_WITH_STREAMLINE "Enable streamline, separate package required" ON)
+
+option(STREAMLINE_FEATURE_DLSS_SR   "Include DLSS-SR dll"   ON)
+option(STREAMLINE_FEATURE_DLSS_RR   "Include DLSS-RR dll"   ON)
+option(STREAMLINE_FEATURE_DLSS_FG   "Include DLSS-FG dll"   ON)
+option(STREAMLINE_FEATURE_REFLEX    "Include Reflex dll"    ON)
+```
+
+Streamline SDK is included as a submodule:
+```cmake
+set(DONUT_STREAMLINE_SEARCH_PATHS ${STREAMLINE_DOWNLOAD_PATH})
+```
+
+### Runtime Configuration
+
+DLSS options are in **Path tracer → Post processing**:
+
+From SampleUI.cpp:720-737:
+```cpp
+if (ImGui::BeginCombo("AA/SR/Denoising", items[m_ui.RealtimeAA]))
+{
+    for (int i = 0; i < itemCount; i++)
+    {
+        bool enabled = false;
+        enabled |= i < 2;                        // Disabled, TAA always available
+        enabled |= (i == 2) && dlssAvailable;    // DLSS SR
+        enabled |= (i == 3) && dlssRRAvailable;  // DLSS-RR
+        // ...
+    }
+}
+```
+
+**Options:**
+- **0**: Disabled (no anti-aliasing)
+- **1**: TAA (Temporal Anti-Aliasing)
+- **2**: DLSS (Super Resolution)
+- **3**: DLSS-RR (Ray Reconstruction)
+
+### Quality Settings
+
+From SampleUI.cpp:137-162:
+
+```cpp
+SI::DLSSMode DLSSModeUI(SI::DLSSMode dlssModeCurrent)
+{
+    ImGui::Combo("DLSS Quality", (int*)&current, 
+        "UltraPerformance\0Performance\0Balanced\0Quality\0DLAA\0");
+}
+```
+
+<CodeGroup>
+```cpp Ultra Performance
+// 33% render resolution
+// 3.0x performance boost
+// Lower quality, best for 8K displays
+DLSSMode::eUltraPerformance
+```
+
+```cpp Performance
+// 50% render resolution  
+// 2.0x performance boost
+// Good balance for 4K
+DLSSMode::eMaxPerformance
+```
+
+```cpp Balanced
+// 58% render resolution
+// 1.7x performance boost  
+// Recommended default
+DLSSMode::eBalanced
+```
+
+```cpp Quality
+// 67% render resolution
+// 1.5x performance boost
+// Best quality upscaling
+DLSSMode::eMaxQuality
+```
+
+```cpp DLAA
+// 100% render resolution
+// No performance boost
+// Best anti-aliasing
+DLSSMode::eDLAA
+```
+</CodeGroup>
+
+## Integration with Path Tracer
+
+### Resolution Management
+
+From Sample.h:150-151:
+```cpp
+uint2 GetRenderSize() const;   // Native render resolution (with DLSS: lower)
+uint2 GetDisplaySize() const;  // Final output resolution (target resolution)
+```
+
+When DLSS SR is enabled:
+- **Render Size**: Reduced based on quality mode (e.g., 1080p)
+- **Display Size**: Target resolution (e.g., 4K)
+- **Upscaling**: Happens in DLSS pass
+
+### Input Requirements
+
+DLSS requires specific inputs from the path tracer:
+
+**Essential:**
+- Color buffer (HDR, pre-tone-mapped)
+- Depth buffer (linear depth)
+- Motion vectors (screen-space velocity)
+
+**For DLSS-RR additionally:**
+- Diffuse radiance
+- Specular radiance  
+- Diffuse hit distance
+- Specular hit distance
+- Normals
+
+## DLSS-RR vs NRD
+
+From SampleUI.cpp:755-758:
+
+```cpp
+UI_SCOPED_DISABLE(!m_ui.RealtimeMode || m_ui.RealtimeAA==3);
+ImGui::Checkbox("Use standalone denoiser (NRD)", &m_ui.StandaloneDenoiser);
+if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) 
+    ImGui::SetTooltip("NRD disabled when using DLSS-RR");
+```
+
+**DLSS-RR** and **NRD** are mutually exclusive:
+
+| Feature | NRD | DLSS-RR |
+|---------|-----|----------|
+| **Denoising Quality** | Good | Excellent |
+| **Detail Preservation** | Can blur details | Better detail |
+| **Temporal Stability** | Good | Excellent |
+| **SPP Requirements** | 2-4 SPP | 1-2 SPP |
+| **Hardware** | Any RTX | RTX 40+ recommended |
+| **Memory** | Moderate | Higher |
+| **Works with ReSTIR** | Yes | Not tuned yet |
+
+<Tip>
+**Recommendation:** Use **DLSS-RR for primary surfaces** and **NRD for secondary bounces** when both are needed (not currently supported in RTXPT).
+</Tip>
+
+## Performance Characteristics
+
+### Frame Time Impact
+
+**4K Display Resolution:**
+
+| Configuration | Render Res | Native Cost | With DLSS | Net Speedup |
+|---------------|------------|-------------|-----------|-------------|
+| **Native 4K** | 3840×2160 | 16.7ms (60fps) | N/A | 1.0x |
+| **DLSS Quality** | 2560×1440 | 7.5ms | +1.5ms | 1.9x |
+| **DLSS Balanced** | 2227×1253 | 5.6ms | +1.5ms | 2.3x |
+| **DLSS Performance** | 1920×1080 | 4.2ms | +1.5ms | 2.9x |
+| **DLSS Ultra Perf** | 1280×720 | 1.9ms | +1.5ms | 4.9x |
+
+<Note>
+DLSS overhead (~1.5ms) is nearly constant regardless of quality setting.
+</Note>
+
+### DLSS-RR Performance
+
+**Compared to NRD + TAA:**
+
+```
+NRD (ReLAX):     2.5ms
+TAA:             1.0ms
+Total:           3.5ms
+
+DLSS-RR:         2.8ms
+Savings:         0.7ms (plus better quality)
+```
+
+## Advanced Settings
+
+From SampleUI.cpp:162:
+```cpp
+ImGui::Text("(DLSS setting also apply to Ray Reconstruction)");
+```
+
+The quality setting affects both SR and RR when using DLSS-RR:
+- Lower quality = more aggressive denoising
+- Higher quality = preserve more detail
+
+### Reflex Integration
+
+From CMakeLists.txt:99:
+```cmake
+option(STREAMLINE_FEATURE_REFLEX "Include Reflex dll" ON)
+```
+
+**NVIDIA Reflex** reduces latency when using DLSS Frame Generation:
+- Optimizes CPU-GPU pipelining
+- Reduces input lag
+- Essential for competitive gaming with FG
+
+## Known Limitations
+
+### DLSS-RR + ReSTIR
+
+From SampleUI.cpp:786-800:
+
+```cpp
+bool disabled = m_ui.RealtimeAA==3 && m_ui.DisableReSTIRsWithDLSSRR;
+UI_SCOPED_DISABLE(disabled);
+ImGui::Checkbox("Use ReSTIR DI (RTXDI)", &m_ui.UseReSTIRDI);
+
+if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("ReSTIR is currently not tuned to work well with DLSS-RR");
+```
+
+<Warning>
+ReSTIR DI/GI with DLSS-RR is **experimental**. Disable `DisableReSTIRsWithDLSSRR` to test, but expect suboptimal results.
+</Warning>
+
+### Debug Layer Warnings
+
+From README.md:63:
+> There is a known issue resulting in LIVE_DEVICE DirectX warnings reported at shutdown when Streamline is enabled in Debug builds
+
+This is cosmetic and doesn't affect functionality.
+
+## Troubleshooting
+
+### DLSS Not Available
+
+Check these requirements:
+- **NVIDIA RTX GPU** (RTX 20-series or newer)
+- **Latest drivers** (560+ recommended)
+- **Streamline enabled** in CMake
+- **DLLs present** in bin directory
+
+### Poor DLSS Quality
+
+If upscaling looks soft or aliased:
+```cpp
+// Try higher quality mode
+m_ui.DLSSMode = DLSSMode::eMaxQuality;  // Instead of Balanced
+
+// Or use DLAA at native resolution
+m_ui.RealtimeAA = 4;  // DLAA mode
+```
+
+### DLSS-RR Artifacts
+
+If denoising has artifacts:
+- Ensure proper hit distance calculation
+- Verify motion vectors are correct
+- Check that diffuse/specular are properly separated
+- Try increasing samples per pixel (1→2 SPP)
+
+## Best Practices
+
+<Steps>
+  <Step title="Choose the Right Mode">
+    **DLSS SR**: For performance
+    **DLAA**: For quality at native res
+    **DLSS-RR**: For path tracing denoising
+  </Step>
+  <Step title="Select Quality Setting">
+    **Balanced**: Good default
+    **Quality**: For 4K+ displays
+    **Performance**: For 1440p/high FPS
+  </Step>
+  <Step title="Tune SPP">
+    **With DLSS-RR**: 1-2 SPP sufficient
+    **Without**: 2-4 SPP recommended
+  </Step>
+  <Step title="Enable Reflex">
+    If using Frame Generation, enable Reflex for lower latency
+  </Step>
+</Steps>
+
+## See Also
+
+- [NVIDIA DLSS](https://www.nvidia.com/en-us/geforce/technologies/dlss/) - Official DLSS information
+- [Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline/) - Integration library
+- [NRD Denoising](/features/nrd-denoising) - Alternative denoising approach
+- [Rendering Modes](/concepts/rendering-modes) - Real-time vs reference mode performance

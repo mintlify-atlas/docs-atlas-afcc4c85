@@ -1,0 +1,154 @@
+---
+title: Shader Execution Reordering (SER)
+description: Improve ray tracing performance with NVIDIA's Shader Execution Reordering technology
+---
+
+## Overview
+
+Shader Execution Reordering (SER) is a powerful NVIDIA RTX technology that significantly improves ray tracing performance by reordering GPU threads to improve cache coherency and execution efficiency. RTXPT supports SER through both DirectX 12 Agility SDK (SM 6.9 HitObject API) and NVAPI extensions.
+
+<Info>
+SER can provide **10-30%** performance improvements in ray tracing workloads by reducing divergence and improving memory access patterns.
+</Info>
+
+## What is SER?
+
+Traditional ray tracing suffers from thread divergence when rays hit different materials or geometry types, causing inefficient GPU utilization. SER addresses this by:
+
+- **Reordering threads** based on material and shader type before executing hit shaders
+- **Improving cache locality** by grouping similar work together
+- **Reducing divergence** in SIMD execution units
+- **Maintaining correctness** while optimizing execution order
+
+## Implementation in RTXPT
+
+RTXPT uses a HitObject-based approach for maximum flexibility:
+
+```hlsl
+// TraceRayInline -> MakeHit -> ReorderThread -> InvokeHit approach
+RayQuery<RAY_FLAG_NONE> query;
+query.TraceRayInline(...);
+
+// After ray traversal completes
+HitObject hitObj = HitObject::FromRayQuery(query);
+HitObject::Reorder(hitObj); // SER magic happens here
+HitObject::Invoke(hitObj, payload);
+```
+
+## Enabling SER
+
+### Requirements
+
+<Warning>
+**For DirectX SM 6.9 HitObject API:**
+- DirectX 12 Agility SDK **1.619 or newer**
+- NVIDIA preview driver for SM 6.9 support
+- See [Microsoft's Shader Model 6.9 preview documentation](https://devblogs.microsoft.com/directx/ser/)
+</Warning>
+
+<Note>
+**For NVAPI HitObject Extension:**
+- NVIDIA RTX GPU (RTX 20-series or newer)
+- NVAPI SDK included in RTXPT
+- Compatible with standard drivers
+</Note>
+
+### CMake Configuration
+
+SER is automatically enabled when using Agility SDK 1.619+:
+
+```cmake
+set(RTXPT_D3D_AGILITY_SDK_VERSION_NAME "1.619.0" CACHE STRING "")
+```
+
+From README.md:38:
+> Uses the SM6.9 HitObject API for Shader Execution Reordering by default, rather than NvAPI
+
+### Runtime Configuration
+
+SER can be toggled in the UI under **Path tracer → Performance**:
+
+```cpp
+// From SampleUI.cpp:857
+ImGui::Checkbox("dx::HitObject codepath", &m_ui.DXHitObjectExtension);
+if (m_ui.DXHitObjectExtension)
+{
+    ImGui::Checkbox("dx::MaybeReorderThreads", &m_ui.DXMaybeReorderThreads);
+}
+```
+
+**NVAPI Alternative:**
+```cpp
+// From SampleUI.cpp:838
+ImGui::Checkbox("NVAPI HitObject codepath", &m_ui.NVAPIHitObjectExtension);
+if (m_ui.NVAPIHitObjectExtension)
+{
+    ImGui::Checkbox("NVAPI ReorderThreads", &m_ui.NVAPIReorderThreads);
+}
+```
+
+## Performance Characteristics
+
+### When SER Helps Most
+
+<Card title="Ideal Scenarios" icon="rocket">
+- Scenes with diverse materials (metal, glass, diffuse)
+- Complex geometry with varying BSDFs
+- Multiple bounce path tracing
+- Mixed opaque and transparent surfaces
+</Card>
+
+### Performance Trade-offs
+
+| Aspect | Impact |
+|--------|--------|
+| **Material Diversity** | More diverse = larger gains |
+| **Ray Coherency** | Less coherent = larger gains |
+| **Simple Shaders** | Overhead may outweigh benefits |
+| **Memory Bandwidth** | Reduces bandwidth pressure |
+
+## Implementation Details
+
+The RTXPT implementation automatically selects the best available SER method:
+
+```cpp
+// From SampleUI.cpp:65-70
+#if RTXPT_D3D_AGILITY_SDK_VERSION >= 619
+    m_ui.DXHitObjectExtension = (GetDevice()->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12);
+    m_ui.NVAPIHitObjectExtension = !m_ui.DXHitObjectExtension && NVAPI_SERSupported;
+#else
+    m_ui.NVAPIHitObjectExtension = NVAPI_SERSupported;
+#endif
+```
+
+**Priority:**
+1. **DirectX HitObject API** (SM 6.9) - if Agility SDK 619+ and DX12
+2. **NVAPI HitObject Extension** - fallback for older SDKs
+3. **Traditional TraceRay** - if SER not available
+
+## Debugging SER
+
+<Tip>
+SER is a **performance-only optimization**. Disabling it should produce identical visual results, making it easy to verify correctness.
+</Tip>
+
+From SampleUI.cpp:838:
+```cpp
+if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("If disabled, traditional TraceRay path is used.\n"
+                      "If enabled, TraceRayInline->MakeHit->ReorderThread->InvokeHit approach is used!");
+```
+
+## Best Practices
+
+1. **Always enable in production** - The performance benefits far outweigh any minimal overhead
+2. **Test both modes** - Verify identical output to ensure correct implementation
+3. **Profile your scene** - Use NVIDIA Nsight Graphics to measure actual gains
+4. **Consider shader complexity** - Very simple shaders may not benefit as much
+
+## See Also
+
+- [NVIDIA SER Blog Post](https://developer.nvidia.com/blog/improve-shader-performance-and-in-game-frame-rates-with-shader-execution-reordering/)
+- [DirectX Shader Model 6.9 Preview](https://devblogs.microsoft.com/directx/ser/)
+- [Opacity Micromaps](/features/opacity-micromaps) - Complementary optimization
+- [RTXDI](/features/rtxdi) - Advanced lighting technique that benefits from SER

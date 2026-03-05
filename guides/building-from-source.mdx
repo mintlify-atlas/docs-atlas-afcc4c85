@@ -1,0 +1,243 @@
+---
+title: Building from Source
+description: Complete guide to building RTX Path Tracing from source code
+---
+
+## Overview
+
+RTX Path Tracing is built using CMake and Visual Studio. This guide covers the complete build process, requirements, and common issues.
+
+<Note>
+At the moment, only Windows builds are fully supported. Linux support is planned for the future.
+</Note>
+
+## Requirements
+
+Before building, ensure you have the following installed:
+
+- **Windows 10 20H1** (version 2004-10.0.19041) or newer
+- **DXR Capable GPU** - DirectX Raytracing 1.1 API or higher
+- **GeForce Game Ready Driver 580.88** or newer
+- **DirectX 12 or Vulkan API**
+- **CMake v4.02+**
+- **Visual Studio 2022** (v143 build tools) or later
+- **Windows 10 SDK** version 10.0.20348.0 or 10.0.26100.0 or later
+
+<Warning>
+Make sure you have the correct Windows SDK version installed. The build will fail if the SDK is missing or outdated.
+</Warning>
+
+## Build Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the repository with all submodules recursively:
+
+    ```bash
+    git clone --recursive https://github.com/NVIDIA-RTX/RTXPT.git
+    ```
+
+    <Warning>
+    You must use the `--recursive` flag to clone all submodules. If you forget, you can run:
+    ```bash
+    git submodule update --init --recursive
+    ```
+    </Warning>
+  </Step>
+
+  <Step title="Configure with CMake">
+    Navigate to the repository directory and configure the build:
+
+    ```bash
+    cd RTXPT
+    cmake CMakeLists.txt -B ./build
+    ```
+
+    **CMake Options:**
+    - Use `-G "some tested VS version"` to specify a Visual Studio version if needed
+    - Make sure the x64 platform is used
+    - The build files will be generated in the `./build/` folder
+
+    <Note>
+    CMake will automatically download required dependencies:
+    - **DXC** (DirectX Shader Compiler) v1.9.2602.17 from NuGet
+    - **Agility SDK** (optional, version 1.619.0 by default)
+    </Note>
+  </Step>
+
+  <Step title="Build the solution">
+    Open the generated solution and build:
+
+    **Option A: Visual Studio**
+    ```bash
+    # Open the solution
+    build/RTXPathTracing.sln
+    ```
+    Then build using Visual Studio (Ctrl+Shift+B)
+
+    **Option B: Command Line**
+    ```bash
+    cmake --build ./build --config Release
+    ```
+
+    <Note>
+    Binaries will be built to the `bin` folder. Assets/media are loaded from the `Assets` folder.
+    </Note>
+  </Step>
+
+  <Step title="Run the application">
+    Select and run the `Rtxpt` project from Visual Studio, or run the executable directly:
+
+    ```bash
+    bin/Rtxpt.exe
+    ```
+
+    <Note>
+    If making a binary distribution, the `Assets` and `Support` folders can be placed into `bin` next to the executable. The app will search for both `Assets/` and `../Assets/`.
+    </Note>
+  </Step>
+</Steps>
+
+## CMake Configuration Options
+
+### Vulkan Support
+
+Vulkan is disabled by default. To enable it, see the [Vulkan Setup Guide](/guides/vulkan-setup).
+
+### DirectX 12 Agility SDK
+
+RTX PT optionally integrates the [DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/).
+
+**CMake Variables:**
+- `RTXPT_D3D_AGILITY_SDK_VERSION_NAME` - SDK version to download (default: "1.619.0")
+  - Available options: "1.619.0", "1.717.0-preview", "1.719.0-preview"
+- `RTXPT_D3D_AGILITY_SDK_PATH` - Path to the SDK (auto-configured)
+- `RTXPT_D3D_AGILITY_SDK_VERSION` - Numeric SDK version (auto-extracted)
+
+<Note>
+Version 717-preview enables native DirectX support for [Shader Execution Reordering](https://devblogs.microsoft.com/directx/ser/) and [Opacity Micromaps](https://devblogs.microsoft.com/directx/omm/). A preview driver is required and can be downloaded from https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
+</Note>
+
+### Other Important Options
+
+```cmake
+# Vulkan support (disabled by default)
+DONUT_WITH_VULKAN=OFF
+NVRHI_WITH_VULKAN=OFF
+
+# Streamline (DLSS, Reflex, etc.)
+DONUT_WITH_STREAMLINE=ON
+
+# NVAPI support
+NVRHI_WITH_NVAPI=ON
+
+# Shader PDBs embedded
+DONUT_EMBED_SHADER_PDBS=ON
+```
+
+## Build Configuration
+
+### Available Configurations
+
+- **Debug** - Full debug symbols, no optimizations
+- **Release** - Optimized build with embedded debug info
+
+Both configurations are set up by default in CMakeLists.txt.
+
+### Output Directories
+
+All binaries and compiled shaders are placed in:
+- **Binaries**: `bin/`
+- **Shaders**: `bin/ShaderPrecompiled/`
+
+## Common Build Issues
+
+<AccordionGroup>
+  <Accordion title="Missing Windows SDK">
+    **Error**: CMake cannot find Windows SDK version 10.0.20348.0 or 10.0.26100.0
+
+    **Solution**: Install the required Windows SDK from Visual Studio Installer or the standalone SDK installer.
+  </Accordion>
+
+  <Accordion title="Submodules not initialized">
+    **Error**: Missing external dependencies or libraries
+
+    **Solution**: Make sure you cloned with `--recursive` or run:
+    ```bash
+    git submodule update --init --recursive
+    ```
+  </Accordion>
+
+  <Accordion title="MSVC v143 build tools not found">
+    **Error**: CMake cannot find MSVC v143 build tools
+
+    **Solution**: Install Visual Studio 2022 with C++ desktop development workload.
+  </Accordion>
+
+  <Accordion title="DXC download fails">
+    **Error**: Failed to download DirectX Shader Compiler
+
+    **Solution**: Check your internet connection. CMake downloads DXC from NuGet automatically. You can also manually download and extract to `external/dxc/`.
+  </Accordion>
+
+  <Accordion title="Streamline compatibility issues">
+    **Error**: Crashes or errors when using PIX or other GPU debugging tools
+
+    **Solution**: Disable `NVRHI_WITH_NVAPI` and `DONUT_WITH_STREAMLINE` in CMake. Note: This results in lower performance and missing features.
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Configuration
+
+### Custom DXC Path
+
+If you need to use a specific DXC compiler version:
+
+```cmake
+set(DXC_CUSTOM_PATH "path/to/dxc" CACHE STRING "Path to embedded dxc")
+```
+
+### NVAPI Configuration
+
+```cmake
+set(NVAPI_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/External/nvapi/")
+set(NVAPI_LIBRARY "${CMAKE_SOURCE_DIR}/External/nvapi/amd64/nvapi64.lib")
+```
+
+### Disabling Features
+
+To disable specific features during build:
+
+```cmake
+# Disable LZ4 compression
+option(DONUT_WITH_LZ4 "Include LZ4" OFF)
+
+# Disable DirectX 11
+option(DONUT_WITH_DX11 OFF)
+```
+
+## Verifying the Build
+
+After a successful build, you should see:
+
+1. `bin/Rtxpt.exe` - Main executable
+2. `bin/ShaderPrecompiled/` - Compiled shaders for DX12/Vulkan
+3. `bin/D3D12/` - Agility SDK files (if enabled)
+
+Run the application to verify:
+
+```bash
+cd bin
+Rtxpt.exe --scene programmer-art.scene.json
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Vulkan Setup" icon="volcano" href="/guides/vulkan-setup">
+    Configure Vulkan support for cross-platform rendering
+  </Card>
+  <Card title="Command Line Options" icon="terminal" href="/guides/command-line">
+    Learn about available command-line flags
+  </Card>
+</CardGroup>

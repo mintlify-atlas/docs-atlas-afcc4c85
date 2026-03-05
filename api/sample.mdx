@@ -1,0 +1,437 @@
+---
+title: "Sample Class"
+description: "Main application class for RTX path tracing, managing initialization, rendering loop, and scene management"
+---
+
+## Overview
+
+The `Sample` class is the core application class that orchestrates the entire RTX path tracing system. It inherits from `donut::app::ApplicationBase` and manages the rendering pipeline, scene loading, camera controls, and user interactions.
+
+**Source:** `~/workspace/source/Rtxpt/Sample.h`, `~/workspace/source/Rtxpt/Sample.cpp`
+
+## Class Declaration
+
+```cpp
+class Sample : public donut::app::ApplicationBase
+{
+public:
+    using ApplicationBase::ApplicationBase;
+    
+    Sample(donut::app::DeviceManager* deviceManager, 
+           CommandLineOptions& cmdLine, 
+           SampleUIData& ui);
+    virtual ~Sample();
+    
+    bool Init(const std::string& preferredScene);
+    void SetCurrentScene(const std::string& sceneName, bool forceReload = false);
+};
+```
+
+## Constructor
+
+<ParamField path="deviceManager" type="donut::app::DeviceManager*" required>
+  Device manager for GPU device access and management
+</ParamField>
+
+<ParamField path="cmdLine" type="CommandLineOptions&" required>
+  Command line options for application configuration
+</ParamField>
+
+<ParamField path="ui" type="SampleUIData&" required>
+  UI data structure for user interface settings and controls
+</ParamField>
+
+### Implementation Details
+
+The constructor initializes the framework components:
+
+```cpp Sample.cpp:119
+Sample::Sample(donut::app::DeviceManager* deviceManager, 
+               CommandLineOptions& cmdLine, 
+               SampleUIData& ui)
+    : app::ApplicationBase(deviceManager), m_cmdLine(cmdLine), m_ui(ui)
+{
+    deviceManager->SetFrameTimeUpdateInterval(1.0f);
+    
+    // Setup shader paths
+    std::filesystem::path frameworkShaderPath = 
+        app::GetDirectoryWithExecutable() / "ShaderPrecompiled/framework" / 
+        app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
+    
+    // Create root file system and mount shader directories
+    m_RootFS = std::make_shared<vfs::RootFileSystem>();
+    m_RootFS->mount("/ShaderPrecompiled/donut", frameworkShaderPath);
+    
+    // Create shader factory
+    m_shaderFactory = std::make_shared<engine::ShaderFactory>(
+        GetDevice(), m_RootFS, "/ShaderPrecompiled");
+    
+    // Initialize camera controls
+    m_camera.SetRotateSpeed(.003f);
+}
+```
+
+## Initialization
+
+### Init
+
+Initializes the rendering system, creates binding layouts, and loads the initial scene.
+
+```cpp
+bool Init(const std::string& preferredScene);
+```
+
+<ParamField path="preferredScene" type="std::string">
+  Name of the scene to load on startup
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if initialization succeeds, `false` otherwise
+</ResponseField>
+
+**Key operations:**
+- Creates bindless layout for GPU resources
+- Initializes binding layouts for ray tracing
+- Sets up constant buffers and debug buffers
+- Enumerates available scene files
+- Loads the preferred scene
+
+```cpp Sample.cpp:181
+bool Sample::Init(const std::string& preferredScene)
+{
+    // Create bindless layout
+    nvrhi::BindlessLayoutDesc bindlessLayoutDesc;
+    bindlessLayoutDesc.visibility = nvrhi::ShaderType::All;
+    bindlessLayoutDesc.firstSlot = 0;
+    bindlessLayoutDesc.maxCapacity = 1024;
+    bindlessLayoutDesc.registerSpaces = {
+        nvrhi::BindingLayoutItem::RawBuffer_SRV(1),
+        nvrhi::BindingLayoutItem::Texture_SRV(2)
+    };
+    m_bindlessLayout = device->createBindlessLayout(bindlessLayoutDesc);
+    
+    // Create global binding layout for ray tracing
+    nvrhi::BindingLayoutDesc globalBindingLayoutDesc;
+    globalBindingLayoutDesc.visibility = nvrhi::ShaderType::All;
+    globalBindingLayoutDesc.bindings = {
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),
+        nvrhi::BindingLayoutItem::RayTracingAccelStruct(0),
+        // ... additional bindings
+    };
+    m_bindingLayout = device->createBindingLayout(globalBindingLayoutDesc);
+    
+    return true;
+}
+```
+
+## Scene Management
+
+### SetCurrentScene
+
+Loads a new scene or reloads the current scene.
+
+```cpp
+void SetCurrentScene(const std::string& sceneName, bool forceReload = false);
+```
+
+<ParamField path="sceneName" type="std::string" required>
+  Name of the scene file to load (e.g., "bistro.scene.json")
+</ParamField>
+
+<ParamField path="forceReload" type="bool" default="false">
+  If `true`, forces reload even if the scene is already loaded
+</ParamField>
+
+```cpp Sample.cpp:412
+void Sample::SetCurrentScene(const std::string& sceneName, bool forceReload)
+{
+    if(m_currentSceneName == sceneName && !forceReload)
+        return;
+    m_currentSceneName = sceneName;
+    m_ui.ResetAccumulation = true;
+    SetAsynchronousLoadingEnabled(false);
+    std::filesystem::path scenePath = GetLocalPath(c_AssetsFolder) / sceneName;
+    m_currentScenePath = scenePath;
+    BeginLoadingScene(std::make_shared<vfs::NativeFileSystem>(), scenePath);
+}
+```
+
+### LoadScene
+
+Loads scene data from a file.
+
+```cpp
+virtual bool LoadScene(std::shared_ptr<donut::vfs::IFileSystem> fs, 
+                       const std::filesystem::path& sceneFileName) override;
+```
+
+```cpp Sample.cpp:459
+bool Sample::LoadScene(std::shared_ptr<vfs::IFileSystem> fs, 
+                       const std::filesystem::path& sceneFileName)
+{
+    m_scene = std::shared_ptr<ExtendedScene>(
+        new ExtendedScene(GetDevice(), *m_shaderFactory, fs, m_TextureCache, 
+                         m_DescriptorTable, 
+                         std::make_shared<ExtendedSceneTypeFactory>()));
+    if (m_scene->Load(sceneFileName))
+        return true;
+    m_scene = nullptr;
+    return false;
+}
+```
+
+## Rendering Pipeline
+
+### Render
+
+Main render function called every frame.
+
+```cpp
+virtual void Render(nvrhi::IFramebuffer* framebuffer) override;
+```
+
+<ParamField path="framebuffer" type="nvrhi::IFramebuffer*" required>
+  Target framebuffer for rendering output
+</ParamField>
+
+### PathTrace
+
+Executes the path tracing rendering pass.
+
+```cpp
+void PathTrace(nvrhi::IFramebuffer* framebuffer, 
+               const SampleConstants& constants);
+```
+
+<ParamField path="framebuffer" type="nvrhi::IFramebuffer*" required>
+  Target framebuffer for path tracing output
+</ParamField>
+
+<ParamField path="constants" type="const SampleConstants&" required>
+  Constant buffer data for the path tracer
+</ParamField>
+
+## Acceleration Structures
+
+### CreateAccelStructs
+
+Creates ray tracing acceleration structures (BLAS and TLAS).
+
+```cpp
+void CreateAccelStructs(nvrhi::ICommandList* commandList);
+```
+
+```cpp Sample.cpp:1067
+void Sample::CreateAccelStructs(nvrhi::ICommandList* commandList)
+{
+    if(m_ommBaker) m_ommBaker->CreateOpacityMicromaps(*m_scene);
+    CreateBlases(commandList);
+    CreateTlas(commandList);
+}
+```
+
+### CreateBlases
+
+Creates bottom-level acceleration structures for all meshes.
+
+```cpp
+void CreateBlases(nvrhi::ICommandList* commandList);
+```
+
+```cpp Sample.cpp:1008
+void Sample::CreateBlases(nvrhi::ICommandList* commandList)
+{
+    for (const std::shared_ptr<MeshInfo>& mesh : 
+         m_scene->GetSceneGraph()->GetMeshes())
+    {
+        if (mesh->isSkinPrototype)
+            continue;
+            
+        nvrhi::rt::AccelStructDesc blasDesc = 
+            bvh::GetMeshBlasDesc(cfg, *mesh, nullptr, false);
+        nvrhi::rt::AccelStructHandle as = GetDevice()->createAccelStruct(blasDesc);
+        nvrhi::utils::BuildBottomLevelAccelStruct(commandList, as, blasDesc);
+        mesh->accelStruct = as;
+    }
+}
+```
+
+### CreateTlas
+
+Creates the top-level acceleration structure.
+
+```cpp
+void CreateTlas(nvrhi::ICommandList* commandList);
+```
+
+```cpp Sample.cpp:1035
+void Sample::CreateTlas(nvrhi::ICommandList* commandList)
+{
+    nvrhi::rt::AccelStructDesc tlasDesc;
+    tlasDesc.isTopLevel = true;
+    tlasDesc.topLevelMaxInstances = 
+        m_scene->GetSceneGraph()->GetMeshInstances().size();
+    tlasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+    m_topLevelAS = GetDevice()->createAccelStruct(tlasDesc);
+}
+```
+
+## Camera Management
+
+### GetCurrentCamera
+
+Returns the current first-person camera.
+
+```cpp
+const donut::app::FirstPersonCamera& GetCurrentCamera() const;
+```
+
+<ResponseField name="return" type="const donut::app::FirstPersonCamera&">
+  Reference to the active camera
+</ResponseField>
+
+### SetCameraVerticalFOV
+
+Sets the vertical field of view for the camera.
+
+```cpp
+void SetCameraVerticalFOV(float cameraFOV);
+```
+
+<ParamField path="cameraFOV" type="float" required>
+  Vertical field of view in radians
+</ParamField>
+
+### SaveCurrentCamera / LoadCurrentCamera
+
+Saves or loads camera position to/from a file.
+
+```cpp
+void SaveCurrentCamera();
+void LoadCurrentCamera();
+```
+
+```cpp Sample.cpp:881
+void Sample::SaveCurrentCamera()
+{
+    float3 worldPos = m_camera.GetPosition();
+    float3 worldDir = m_camera.GetDir();
+    float3 worldUp  = m_camera.GetUp();
+    
+    std::ofstream file;
+    file.open(app::GetDirectoryWithExecutable() / "campos.txt", 
+              std::ios_base::out | std::ios_base::trunc);
+    if(file.is_open())
+    {
+        file << worldPos.x << " " << worldPos.y << " " << worldPos.z;
+        // ... saves camera JSON
+    }
+}
+```
+
+## Input Handling
+
+### KeyboardUpdate
+
+Handles keyboard input events.
+
+```cpp
+virtual bool KeyboardUpdate(int key, int scancode, int action, int mods) override;
+```
+
+### MousePosUpdate
+
+Handles mouse movement events.
+
+```cpp
+virtual bool MousePosUpdate(double xpos, double ypos) override;
+```
+
+### MouseButtonUpdate
+
+Handles mouse button events.
+
+```cpp
+virtual bool MouseButtonUpdate(int button, int action, int mods) override;
+```
+
+## Getters
+
+### GetScene
+
+Returns the currently loaded scene.
+
+```cpp
+std::shared_ptr<donut::engine::Scene> GetScene() const;
+```
+
+<ResponseField name="return" type="std::shared_ptr<donut::engine::Scene>">
+  Shared pointer to the active scene
+</ResponseField>
+
+### GetRenderSize / GetDisplaySize
+
+Returns rendering or display resolution.
+
+```cpp
+uint2 GetRenderSize() const;   // Native render resolution
+uint2 GetDisplaySize() const;  // Final output resolution (post-upscaling)
+```
+
+### GetAvgTimePerFrame
+
+Returns average frame time for benchmarking.
+
+```cpp
+float GetAvgTimePerFrame() const;
+```
+
+```cpp Sample.cpp:873
+float Sample::GetAvgTimePerFrame() const
+{
+    if (m_benchFrames == 0)
+        return 0.0f;
+    std::chrono::duration<double> elapsed = (m_benchLast - m_benchStart);
+    return float(elapsed.count() / m_benchFrames);
+}
+```
+
+## Member Variables
+
+Key private member variables:
+
+```cpp
+private:
+    std::shared_ptr<ExtendedScene>              m_scene;
+    std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
+    std::unique_ptr<RenderTargets>              m_renderTargets;
+    nvrhi::rt::AccelStructHandle                m_topLevelAS;
+    donut::app::FirstPersonCamera               m_camera;
+    std::shared_ptr<donut::engine::PlanarView>  m_view;
+    uint64_t                                    m_frameIndex = 0;
+    int                                         m_accumulationSampleIndex = 0;
+    SampleUIData&                               m_ui;
+    CommandLineOptions                          m_cmdLine;
+```
+
+## Usage Example
+
+```cpp
+// Initialize the sample
+Sample sample(deviceManager, cmdLineOptions, uiData);
+if (!sample.Init("bistro.scene.json"))
+{
+    // Handle initialization failure
+    return;
+}
+
+// Change scene
+sample.SetCurrentScene("sponza.scene.json");
+
+// Main render loop
+while (running)
+{
+    sample.Animate(deltaTime);
+    sample.Render(framebuffer);
+}
+```

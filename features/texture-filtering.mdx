@@ -1,0 +1,434 @@
+---
+title: Stochastic Texture Filtering
+description: High-quality texture filtering for ray traced rendering with RTXTF
+---
+
+## Overview
+
+**Stochastic Texture Filtering** eliminates texture aliasing in ray traced rendering by applying randomized sampling patterns to texture fetches. RTXPT integrates the **RTXTF library** to provide high-quality texture filtering specifically designed for path tracing.
+
+<Info>
+Stochastic texture filtering **eliminates moire patterns and temporal aliasing** that plague traditional bilinear/trilinear filtering in ray traced contexts.
+</Info>
+
+## The Problem with Traditional Filtering
+
+In rasterization, texture filtering uses screen-space derivatives (DDX/DDY) to compute mip levels:
+
+```hlsl
+// Rasterization (doesn't work for ray tracing)
+float4 color = myTexture.Sample(sampler, uv);  // Uses implicit derivatives
+```
+
+In ray tracing, **there are no screen-space derivatives** because rays can:
+- Come from any direction (not just the camera)
+- Sample arbitrary points (not just adjacent pixels)
+- Scatter in unpredictable ways
+
+This leads to:
+- ❌ Severe texture aliasing
+- ❌ Moire patterns
+- ❌ Temporal shimmering
+- ❌ Loss of high-frequency detail
+
+## Stochastic Filtering Solution
+
+RTXTF applies **randomized sampling patterns** to texture fetches:
+
+1. **Compute explicit LOD** using ray cones or ray differentials
+2. **Apply stochastic sampling** at that LOD level
+3. **Randomize filter taps** across pixels/frames
+4. **Accumulate** over multiple samples
+
+From SampleUI.cpp:886-917:
+```cpp
+if (ImGui::CollapsingHeader("Stochastic Texture Filtering"))
+{
+    ImGui::Combo("Magnification Method", (int*)&m_ui.STFMagnificationMethod,
+        "Default\0"
+        "Quad2x2\0"
+        "Fine2x2\0"
+        "FineTemporal2x2\0"
+        "FineAlu3x3\0"
+        "FineLut3x3\0"
+        "Fine4x4\0"
+    );
+
+    ImGui::Combo("Filter Type", (int*)&m_ui.STFFilterMode,
+        "Point\0"
+        "Linear\0"
+        "Cubic\0"
+        "Gaussian\0"
+    );
+
+    ImGui::SliderFloat("Sigma", &m_ui.STFGaussianSigma, 0.f, 100.f);
+}
+```
+
+## Enabling Stochastic Filtering
+
+### Build Configuration
+
+From PathTracer/Config.h:96:
+```cpp
+#define RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 0  // 0 = disabled, 1 = enabled
+```
+
+<Warning>
+Stochastic texture filtering is **currently disabled by default** (set to 0). To enable it, change this define to 1 and rebuild.
+</Warning>
+
+### Runtime Configuration
+
+When enabled, settings appear in the UI under **Stochastic Texture Filtering**:
+
+From SampleUI.h:167-169:
+```cpp
+StfFilterMode STFFilterMode = StfFilterMode::Linear;
+StfMagnificationMethod STFMagnificationMethod = StfMagnificationMethod::Default;
+float STFGaussianSigma = 0.3f;
+```
+
+## Configuration Options
+
+### Magnification Methods
+
+From Sample.cpp:1409-1415:
+
+```cpp
+switch (method) {
+    case StfMagnificationMethod::Default:           // No stochastic sampling
+    case StfMagnificationMethod::Quad2x2:           // 2x2 quad sampling
+    case StfMagnificationMethod::Fine2x2:           // Fine 2x2 sampling
+    case StfMagnificationMethod::FineTemporal2x2:   // Temporal variation
+    case StfMagnificationMethod::FineAlu3x3:        // ALU-based 3x3
+    case StfMagnificationMethod::FineLut3x3:        // LUT-based 3x3
+    case StfMagnificationMethod::Fine4x4:           // Fine 4x4 sampling
+}
+```
+
+<Accordion title="Magnification Method Details">
+
+**Default**
+- No stochastic sampling, traditional filtering
+- Lowest quality, fastest
+- Use for debugging/comparison
+
+**Quad2x2**
+- 2×2 sampling using quad operations
+- Good quality/performance balance
+- Requires wave operations
+
+**Fine2x2**
+- High-quality 2×2 sampling
+- Independent per-pixel randomization
+- Good for static images
+
+**FineTemporal2x2**
+- 2×2 with temporal variation
+- Best for animated sequences
+- Reduces frame-to-frame correlation
+
+**FineAlu3x3**
+- 3×3 sampling using ALU operations
+- Higher quality than 2×2
+- More expensive
+
+**FineLut3x3**
+- 3×3 sampling using lookup tables
+- Faster than ALU version
+- Requires LUT resources
+
+**Fine4x4**
+- Highest quality 4×4 sampling
+- Most expensive
+- Best for hero assets/close-ups
+
+</Accordion>
+
+### Filter Types
+
+From Sample.cpp:1425-1428:
+
+```cpp
+switch (filterMode) {
+    case StfFilterMode::Point:      // Nearest neighbor
+    case StfFilterMode::Linear:     // Bilinear interpolation
+    case StfFilterMode::Cubic:      // Bicubic interpolation
+    case StfFilterMode::Gaussian:   // Gaussian kernel
+}
+```
+
+<CodeGroup>
+```cpp Point
+// Nearest neighbor
+// Sharpest, most aliasing
+// Use for intentionally pixelated look
+STFFilterMode = StfFilterMode::Point;
+```
+
+```cpp Linear (Default)
+// Bilinear interpolation
+// Good quality/performance
+// Recommended for most use cases
+STFFilterMode = StfFilterMode::Linear;
+```
+
+```cpp Cubic
+// Bicubic interpolation  
+// Sharper than linear
+// More expensive, better for sharp textures
+STFFilterMode = StfFilterMode::Cubic;
+```
+
+```cpp Gaussian
+// Gaussian kernel
+// Smoothest, customizable with sigma
+// Best for reducing noise
+STFFilterMode = StfFilterMode::Gaussian;
+STFGaussianSigma = 0.3f;  // Kernel width
+```
+</CodeGroup>
+
+### Gaussian Sigma
+
+From SampleUI.cpp:915:
+```cpp
+ImGui::SliderFloat("Sigma", &m_ui.STFGaussianSigma, 0.f, 100.f, 
+                   "%.3f", ImGuiSliderFlags_Logarithmic);
+```
+
+Only active when `FilterType = Gaussian`:
+
+- **Small sigma (0.1-0.5)**: Sharp, minimal blur
+- **Medium sigma (0.5-2.0)**: Balanced
+- **Large sigma (2.0+)**: Very smooth, may look blurry
+
+<Tip>
+**Default 0.3** is a good starting point. Increase if textures look noisy, decrease if too blurry.
+</Tip>
+
+## Integration with Path Tracer
+
+### Shader Integration
+
+From PathTracerBridgeDonut.hlsli:535-553:
+
+```hlsl
+STF_SamplerState stfSamplerState;
+
+// Initialize random seed
+uint u;
+if (g_Const.ptConsts.STFUseBlueNoise)
+{
+    // Use blue noise for better quality
+    u = GetBlueNoiseSample(...);
+}
+else
+{
+    // Use white noise
+    u = rand.NextUInt();
+}
+
+// Create STF sampler state
+stfSamplerState = STF_SamplerState::Create(u);
+stfSamplerState.SetFilterType(g_Const.ptConsts.STFFilterMode);
+stfSamplerState.SetMagMethod(g_Const.ptConsts.STFMagnificationMethod);
+stfSamplerState.SetSigma(g_Const.ptConsts.STFGaussianSigma);
+```
+
+### Texture Sampling
+
+From PathTracer/Scene/Material/TextureSampler.hlsli:58-70:
+
+```hlsl
+struct ExplicitLodTextureSampler
+{
+    STF_SamplerState stfSamplerState;
+    
+    void __init(float lod, STF_SamplerState stfSamplerState)
+    {
+        this.lod = lod;
+        this.stfSamplerState = stfSamplerState;
+    }
+    
+    // Use for sampling with explicit LOD
+    float4 Sample(Texture2D tex, float2 uv) {
+        return STF_Sample(tex, stfSamplerState, uv, lod);
+    }
+};
+```
+
+### Ray Cones Integration
+
+From PathTracer/Scene/Material/TextureSampler.hlsli:97-110:
+
+```hlsl
+struct ExplicitRayConesLodTextureSampler
+{
+    STF_SamplerState stfSamplerState;
+    float rayconesLODWithoutTexDims;
+    
+    // Initialize with ray cone LOD
+    static ExplicitRayConesLodTextureSampler make(
+        float rayconesLODWithoutTexDims, 
+        STF_SamplerState stfSamplerState
+    );
+    
+    // Automatically computes LOD from ray cones
+    float4 Sample(Texture2D tex, float2 uv);
+};
+```
+
+RTXPT uses **Ray Cones** for texture LOD computation (from README.md:35):
+> use of RayCones for texture MIP selection
+
+## Performance Characteristics
+
+### Method Performance
+
+| Method | Relative Cost | Quality | Best For |
+|--------|---------------|---------|----------|
+| **Default** | 1.0x (baseline) | Low | Debugging |
+| **Quad2x2** | 1.1x | Good | Balanced |
+| **Fine2x2** | 1.2x | Good | Static scenes |
+| **FineTemporal2x2** | 1.2x | Better | Animations |
+| **FineAlu3x3** | 1.5x | High | Quality focus |
+| **FineLut3x3** | 1.3x | High | With LUT resources |
+| **Fine4x4** | 2.0x | Highest | Hero shots |
+
+### Filter Performance
+
+| Filter | Relative Cost | Visual Characteristics |
+|--------|---------------|------------------------|
+| **Point** | 0.9x | Sharp, aliased |
+| **Linear** | 1.0x (baseline) | Balanced |
+| **Cubic** | 1.4x | Sharp, clean |
+| **Gaussian** | 1.2-1.6x | Smooth (depends on sigma) |
+
+## Recommended Settings
+
+### High Performance
+
+```cpp
+RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 1
+
+STFMagnificationMethod = StfMagnificationMethod::Quad2x2;
+STFFilterMode = StfFilterMode::Linear;
+// No Gaussian sigma needed
+```
+
+### Balanced Quality
+
+```cpp
+RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 1
+
+STFMagnificationMethod = StfMagnificationMethod::FineTemporal2x2;
+STFFilterMode = StfFilterMode::Linear;
+// Or Cubic for sharper textures
+```
+
+### Maximum Quality
+
+```cpp
+RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 1
+
+STFMagnificationMethod = StfMagnificationMethod::Fine4x4;
+STFFilterMode = StfFilterMode::Cubic;
+// Or Gaussian with sigma = 0.3 for smoothness
+```
+
+### For Noisy Textures
+
+```cpp
+RTXPT_STOCHASTIC_TEXTURE_FILTERING_ENABLE 1
+
+STFMagnificationMethod = StfMagnificationMethod::FineTemporal2x2;
+STFFilterMode = StfFilterMode::Gaussian;
+STFGaussianSigma = 0.5f;  // Adjust to taste
+```
+
+## Blue Noise vs White Noise
+
+From PathTracerBridgeDonut.hlsli:538-548:
+
+```hlsl
+if (g_Const.ptConsts.STFUseBlueNoise)
+{
+    u = GetBlueNoiseSample(pixelPosition, frameIndex);
+}
+else
+{
+    u = rand.NextUInt();  // White noise
+}
+```
+
+**Blue Noise** (if enabled):
+- Better spectral properties
+- Less perceptual noise
+- Requires blue noise texture
+
+**White Noise** (default):
+- Simpler, no extra resources
+- More high-frequency noise
+- Faster
+
+## Troubleshooting
+
+### Aliasing Still Visible
+
+If textures still look aliased:
+
+```cpp
+// Increase sampling quality
+STFMagnificationMethod = StfMagnificationMethod::Fine4x4;
+
+// Or ensure enough path tracing samples
+RealtimeSamplesPerPixel = 2;  // Increase from 1
+```
+
+### Textures Look Blurry
+
+If textures are too soft:
+
+```cpp
+// Use sharper filter
+STFFilterMode = StfFilterMode::Cubic;  // Instead of Gaussian
+
+// Or reduce Gaussian sigma
+STFGaussianSigma = 0.1f;  // From 0.3f
+
+// Check mip bias isn't too positive
+TexLODBias = 0.0f;  // From SampleUI.cpp:692
+```
+
+### Performance Issues
+
+If stochastic filtering is too expensive:
+
+```cpp
+// Use cheaper method
+STFMagnificationMethod = StfMagnificationMethod::Quad2x2;  // From Fine4x4
+
+// Use faster filter
+STFFilterMode = StfFilterMode::Linear;  // Instead of Cubic/Gaussian
+```
+
+### Temporal Flickering
+
+If textures flicker frame-to-frame:
+
+```cpp
+// Use temporal variation
+STFMagnificationMethod = StfMagnificationMethod::FineTemporal2x2;
+
+// Increase accumulation samples
+RealtimeSamplesPerPixel = 2;  // Or enable TAA/DLSS
+```
+
+## See Also
+
+- [NVIDIA RTXTF Library](https://github.com/NVIDIA-RTX/RTXTF-Library) - Official RTXTF SDK
+- [Ray Cones Paper](https://research.nvidia.com/publication/2021-04_improved-shader-and-texture-level-detail-using-ray-cones) - LOD computation method
+- [UI Controls](/guides/ui-controls) - Path tracer configuration settings
+- [Materials API](/api/path-tracer/materials) - Material and texture system reference

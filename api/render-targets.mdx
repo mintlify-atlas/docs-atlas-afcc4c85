@@ -1,0 +1,493 @@
+---
+title: "RenderTargets Class"
+description: "Manages all GPU render target buffers and textures for the path tracing pipeline"
+---
+
+## Overview
+
+The `RenderTargets` class manages all GPU textures and buffers used throughout the RTX path tracing pipeline. It handles creation, resizing, and clearing of render targets including radiance buffers, denoising buffers, motion vectors, depth, and post-processing targets.
+
+**Source:** `~/workspace/source/Rtxpt/RenderTargets.h`, `~/workspace/source/Rtxpt/RenderTargets.cpp`
+
+## Class Declaration
+
+```cpp
+class RenderTargets
+{
+public:
+    // Render target textures
+    nvrhi::TextureHandle AccumulatedRadiance;
+    nvrhi::TextureHandle LdrColor;
+    nvrhi::TextureHandle OutputColor;
+    nvrhi::TextureHandle ProcessedOutputColor;
+    nvrhi::TextureHandle Depth;
+    nvrhi::TextureHandle ScreenMotionVectors;
+    
+    // Denoising buffers
+    nvrhi::TextureHandle DenoiserViewspaceZ;
+    nvrhi::TextureHandle DenoiserMotionVectors;
+    nvrhi::TextureHandle DenoiserNormalRoughness;
+    nvrhi::TextureHandle DenoiserDiffRadianceHitDist;
+    nvrhi::TextureHandle DenoiserSpecRadianceHitDist;
+    nvrhi::TextureHandle DenoiserOutDiffRadianceHitDist[cStablePlaneCount];
+    nvrhi::TextureHandle DenoiserOutSpecRadianceHitDist[cStablePlaneCount];
+    
+    // Stable planes
+    nvrhi::TextureHandle StableRadiance;
+    nvrhi::TextureHandle StablePlanesHeader;
+    nvrhi::BufferHandle  StablePlanesBuffer;
+    
+    // Framebuffers
+    std::shared_ptr<donut::engine::FramebufferFactory> ProcessedOutputFramebuffer;
+    std::shared_ptr<donut::engine::FramebufferFactory> LdrFramebuffer;
+    
+    void Init(nvrhi::IDevice* device, 
+              donut::math::uint2 renderSize, 
+              donut::math::uint2 displaySize,
+              bool enableMotionVectors, 
+              bool useReverseProjection, 
+              int backbufferCount);
+    
+    bool IsUpdateRequired(donut::math::uint2 renderSize, 
+                          donut::math::uint2 displaySize, 
+                          donut::math::uint sampleCount = 1) const;
+    
+    void Clear(nvrhi::ICommandList* commandList);
+};
+```
+
+## Initialization
+
+### Init
+
+Initializes all render target textures and buffers.
+
+```cpp
+void Init(nvrhi::IDevice* device,
+          donut::math::uint2 renderSize,
+          donut::math::uint2 displaySize,
+          bool enableMotionVectors,
+          bool useReverseProjection,
+          int backbufferCount);
+```
+
+<ParamField path="device" type="nvrhi::IDevice*" required>
+  NVRHI device for creating GPU resources
+</ParamField>
+
+<ParamField path="renderSize" type="donut::math::uint2" required>
+  Native rendering resolution (before upscaling)
+</ParamField>
+
+<ParamField path="displaySize" type="donut::math::uint2" required>
+  Final output resolution (after DLSS/upscaling)
+</ParamField>
+
+<ParamField path="enableMotionVectors" type="bool" required>
+  Whether to create motion vector buffers for temporal effects
+</ParamField>
+
+<ParamField path="useReverseProjection" type="bool" required>
+  Whether to use reverse-Z depth projection (0 = far, 1 = near)
+</ParamField>
+
+<ParamField path="backbufferCount" type="int" required>
+  Number of backbuffers for frame pipelining (typically 3)
+</ParamField>
+
+```cpp RenderTargets.cpp:31
+void RenderTargets::Init(
+    nvrhi::IDevice* device,
+    donut::math::uint2 renderSize, 
+    donut::math::uint2 displaySize,
+    bool enableMotionVectors,
+    bool useReverseProjection,
+    int backbufferCount)
+{
+    m_UseReverseProjection = useReverseProjection;
+    m_BackbufferCount = backbufferCount;
+    m_device = device;
+    m_renderSize = renderSize;
+    m_displaySize = displaySize;
+    
+    nvrhi::TextureDesc desc;
+    desc.width = renderSize.x;
+    desc.height = renderSize.y;
+    desc.sampleCount = 1;
+    desc.dimension = nvrhi::TextureDimension::Texture2D;
+    desc.keepInitialState = true;
+    desc.mipLevels = 1;
+    
+    // Create depth buffer
+    desc.format = nvrhi::Format::R32_FLOAT;
+    desc.isUAV = true;
+    desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    desc.debugName = "Depth";
+    Depth = device->createTexture(desc);
+    
+    // Create motion vectors
+    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.debugName = "ScreenMotionVectors";
+    ScreenMotionVectors = device->createTexture(desc);
+    
+    // ... create all other render targets
+}
+```
+
+### IsUpdateRequired
+
+Checks if render targets need to be recreated due to resolution changes.
+
+```cpp
+bool IsUpdateRequired(donut::math::uint2 renderSize,
+                      donut::math::uint2 displaySize,
+                      donut::math::uint sampleCount = 1) const;
+```
+
+<ParamField path="renderSize" type="donut::math::uint2" required>
+  New native render resolution
+</ParamField>
+
+<ParamField path="displaySize" type="donut::math::uint2" required>
+  New display resolution
+</ParamField>
+
+<ParamField path="sampleCount" type="donut::math::uint" default="1">
+  MSAA sample count
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns `true` if any dimension has changed and textures need recreation
+</ResponseField>
+
+```cpp RenderTargets.cpp:289
+bool RenderTargets::IsUpdateRequired(
+    donut::math::uint2 renderSize, 
+    donut::math::uint2 displaySize, 
+    donut::math::uint sampleCount) const
+{
+    if (any(m_renderSize != renderSize) || 
+        any(m_displaySize != displaySize) || 
+        m_SampleCount != sampleCount) 
+        return true;
+    return false;
+}
+```
+
+### Clear
+
+Clears render target buffers to default values.
+
+```cpp
+void Clear(nvrhi::ICommandList* commandList);
+```
+
+<ParamField path="commandList" type="nvrhi::ICommandList*" required>
+  Command list for issuing GPU clear commands
+</ParamField>
+
+```cpp RenderTargets.cpp:295
+void RenderTargets::Clear(nvrhi::ICommandList* commandList)
+{
+    const nvrhi::FormatInfo& depthFormatInfo = 
+        nvrhi::getFormatInfo(Depth->getDesc().format);
+    
+    float depthClearValue = m_UseReverseProjection ? 0.f : 1.f;
+    commandList->clearTextureFloat(Depth, nvrhi::AllSubresources, 
+                                   nvrhi::Color(depthClearValue));
+    
+    commandList->clearTextureFloat(CombinedHistoryClampRelax, 
+                                   nvrhi::AllSubresources, 
+                                   nvrhi::Color(0));
+}
+```
+
+## Render Target Types
+
+### Primary Radiance Buffers
+
+<ParamField path="AccumulatedRadiance" type="nvrhi::TextureHandle">
+  **Format:** `RGBA32_FLOAT`
+  
+  **Usage:** Accumulates path-traced radiance in non-realtime (reference) mode. Each frame adds to this buffer for progressive refinement.
+</ParamField>
+
+<ParamField path="OutputColor" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Raw path tracing output for the current frame. This is the input to TAA/DLSS in realtime mode.
+</ParamField>
+
+<ParamField path="ProcessedOutputColor" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Post-processed color after TAA/DLSS upscaling, but before tone mapping. Full display resolution.
+</ParamField>
+
+<ParamField path="LdrColor" type="nvrhi::TextureHandle">
+  **Format:** `SRGBA8_UNORM`
+  
+  **Usage:** Final tone-mapped LDR color ready for display.
+</ParamField>
+
+<ParamField path="LdrColorScratch" type="nvrhi::TextureHandle">
+  **Format:** `SRGBA8_UNORM`
+  
+  **Usage:** Scratch buffer for ping-ponging post-process effects with LdrColor.
+</ParamField>
+
+### Geometry Buffers
+
+<ParamField path="Depth" type="nvrhi::TextureHandle">
+  **Format:** `R32_FLOAT`
+  
+  **Usage:** Screen-space depth buffer. Exported by path tracer, used by TAA and other post-processes. Supports reverse-Z projection.
+</ParamField>
+
+<ParamField path="ScreenMotionVectors" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Screen-space motion vectors for temporal reprojection. Used by RTXDI, TAA, and temporal denoising.
+</ParamField>
+
+<ParamField path="Throughput" type="nvrhi::TextureHandle">
+  **Format:** `R32_UINT`
+  
+  **Usage:** Path throughput after perfect specular reflections. Used by RTXDI for correct MIS weighting with PSR (Perfect Specular Reflections).
+</ParamField>
+
+<ParamField path="SurfaceDataBuffer" type="nvrhi::BufferHandle">
+  **Stride:** `sizeof(PackedPathTracerSurfaceData)`
+  
+  **Usage:** Packed G-buffer containing surface properties (position, normal, material) with temporal history.
+</ParamField>
+
+### Denoising Buffers
+
+<ParamField path="DenoiserViewspaceZ" type="nvrhi::TextureHandle">
+  **Format:** `R32_FLOAT`
+  
+  **Usage:** View-space depth for NRD denoiser.
+</ParamField>
+
+<ParamField path="DenoiserMotionVectors" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Motion vectors in NRD's expected format.
+</ParamField>
+
+<ParamField path="DenoiserNormalRoughness" type="nvrhi::TextureHandle">
+  **Format:** `R10G10B10A2_UNORM`
+  
+  **Usage:** Packed normal and roughness for denoising.
+</ParamField>
+
+<ParamField path="DenoiserDiffRadianceHitDist" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Input to denoiser: diffuse radiance and hit distance.
+</ParamField>
+
+<ParamField path="DenoiserSpecRadianceHitDist" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Input to denoiser: specular radiance and hit distance.
+</ParamField>
+
+<ParamField path="DenoiserOutDiffRadianceHitDist" type="nvrhi::TextureHandle[cStablePlaneCount]">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Denoiser output for diffuse component, one texture per stable plane instance.
+</ParamField>
+
+<ParamField path="DenoiserOutSpecRadianceHitDist" type="nvrhi::TextureHandle[cStablePlaneCount]">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Denoiser output for specular component, one texture per stable plane instance.
+</ParamField>
+
+<ParamField path="DenoiserDisocclusionThresholdMix" type="nvrhi::TextureHandle">
+  **Format:** `R8_UNORM`
+  
+  **Usage:** Per-pixel disocclusion threshold for adaptive temporal filtering (see NRD's `IN_DISOCCLUSION_THRESHOLD_MIX`).
+</ParamField>
+
+### Stable Planes Buffers
+
+Stable planes are used for multi-plane path tracing and denoising.
+
+<ParamField path="StableRadiance" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Radiance that doesn't require denoising (stable/converged paths). Useful for debug visualization.
+</ParamField>
+
+<ParamField path="StablePlanesHeader" type="nvrhi::TextureHandle">
+  **Format:** `R32_UINT`
+  
+  **Dimension:** Texture2DArray with 4 layers
+  
+  **Usage:** Header information for stable plane management.
+</ParamField>
+
+<ParamField path="StablePlanesBuffer" type="nvrhi::BufferHandle">
+  **Stride:** `sizeof(StablePlane)`
+  
+  **Usage:** Structured buffer containing stable plane data for multi-plane path tracing.
+</ParamField>
+
+```cpp RenderTargets.cpp:260
+{
+    nvrhi::BufferDesc bufferDesc;
+    bufferDesc.structStride = sizeof(StablePlane);
+    bufferDesc.byteSize = sizeof(StablePlane) * 
+        GenericTSComputeStorageElementCount(m_renderSize.x, m_renderSize.y, 
+                                           cStablePlaneCount);
+    bufferDesc.canHaveUAVs = true;
+    bufferDesc.keepInitialState = true;
+    bufferDesc.initialState = nvrhi::ResourceStates::Common;
+    bufferDesc.debugName = "StablePlanesBuffer";
+    StablePlanesBuffer = device->createBuffer(bufferDesc);
+}
+```
+
+### DLSS-RR Buffers
+
+These buffers are used specifically for NVIDIA DLSS Ray Reconstruction.
+
+<ParamField path="RRDiffuseAlbedo" type="nvrhi::TextureHandle">
+  **Format:** `R11G11B10_FLOAT`
+  
+  **Usage:** Diffuse albedo for DLSS-RR (corresponds to `sl::kBufferTypeAlbedo`).
+</ParamField>
+
+<ParamField path="RRSpecAlbedo" type="nvrhi::TextureHandle">
+  **Format:** `R11G11B10_FLOAT`
+  
+  **Usage:** Specular albedo for DLSS-RR (corresponds to `sl::kBufferTypeSpecularAlbedo`).
+</ParamField>
+
+<ParamField path="RRNormalsAndRoughness" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Packed normals and roughness for DLSS-RR (see `sl::kBufferTypeNormals` and `sl::DLSSDNormalRoughnessMode::ePacked`).
+</ParamField>
+
+<ParamField path="RRSpecMotionVectors" type="nvrhi::TextureHandle">
+  **Format:** `RG16_FLOAT`
+  
+  **Usage:** Specular motion vectors for DLSS-RR (corresponds to `sl::kBufferTypeSpecularMotionVectors`).
+</ParamField>
+
+### ReSTIR GI Buffers
+
+<ParamField path="SecondarySurfacePositionNormal" type="nvrhi::TextureHandle">
+  **Format:** `RGBA32_FLOAT`
+  
+  **Usage:** Secondary surface hit position and normal for ReSTIR GI.
+</ParamField>
+
+<ParamField path="SecondarySurfaceRadiance" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_FLOAT`
+  
+  **Usage:** Radiance at secondary surfaces for ReSTIR GI temporal reuse.
+</ParamField>
+
+### Temporal Anti-Aliasing Buffers
+
+<ParamField path="TemporalFeedback1" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_SNORM`
+  
+  **Usage:** Temporal feedback buffer 1 for TAA ping-pong.
+</ParamField>
+
+<ParamField path="TemporalFeedback2" type="nvrhi::TextureHandle">
+  **Format:** `RGBA16_SNORM`
+  
+  **Usage:** Temporal feedback buffer 2 for TAA ping-pong.
+</ParamField>
+
+<ParamField path="CombinedHistoryClampRelax" type="nvrhi::TextureHandle">
+  **Format:** `R8_UNORM`
+  
+  **Usage:** Combined disocclusion data. Tells TAA where to relax history clamping to minimize aliasing.
+</ParamField>
+
+### Framebuffer Factories
+
+<ParamField path="ProcessedOutputFramebuffer" type="std::shared_ptr<donut::engine::FramebufferFactory>">
+  Framebuffer wrapping `ProcessedOutputColor` for render passes that output post-TAA/DLSS color.
+</ParamField>
+
+<ParamField path="LdrFramebuffer" type="std::shared_ptr<donut::engine::FramebufferFactory>">
+  Framebuffer wrapping `LdrColor` for tone mapping and final output passes.
+</ParamField>
+
+```cpp RenderTargets.cpp:254
+ProcessedOutputFramebuffer = 
+    std::make_shared<donut::engine::FramebufferFactory>(device);
+ProcessedOutputFramebuffer->RenderTargets = { ProcessedOutputColor };
+
+LdrFramebuffer = std::make_shared<donut::engine::FramebufferFactory>(device);
+LdrFramebuffer->RenderTargets = { LdrColor };
+```
+
+## Member Variables
+
+```cpp
+private:
+    const dm::uint m_SampleCount = 1;  // No MSAA support
+    bool m_UseReverseProjection = false;
+    int m_BackbufferCount = 3;
+    nvrhi::IDevice* m_device;
+    
+public:
+    donut::math::uint2 m_renderSize;   // Render targets pre-DLSS
+    donut::math::uint2 m_displaySize;  // Render targets post-DLSS
+    nvrhi::HeapHandle Heap;            // For virtual textures (optional)
+```
+
+## Usage Example
+
+```cpp
+// Create and initialize render targets
+RenderTargets renderTargets;
+renderTargets.Init(
+    device,
+    uint2(1920, 1080),  // Native render size
+    uint2(3840, 2160),  // Display size (DLSS upscaled)
+    true,               // Enable motion vectors
+    true,               // Use reverse-Z projection
+    3                   // Triple buffering
+);
+
+// Check if resize needed
+if (renderTargets.IsUpdateRequired(newRenderSize, newDisplaySize))
+{
+    // Recreate render targets at new resolution
+    renderTargets.Init(device, newRenderSize, newDisplaySize, ...);
+}
+
+// Clear buffers at frame start
+commandList->open();
+renderTargets.Clear(commandList);
+
+// Use render targets in path tracing
+bindingSet->bindTexture(0, renderTargets.OutputColor);
+bindingSet->bindTexture(1, renderTargets.Depth);
+bindingSet->bindTexture(2, renderTargets.ScreenMotionVectors);
+
+// Access denoising outputs
+for (int i = 0; i < cStablePlaneCount; ++i)
+{
+    auto diffuse = renderTargets.DenoiserOutDiffRadianceHitDist[i];
+    auto specular = renderTargets.DenoiserOutSpecRadianceHitDist[i];
+}
+```
+
+## Notes
+
+- All render targets use `keepInitialState = true` to avoid unnecessary state transitions
+- The class supports both native rendering resolution and display resolution for DLSS/upscaling workflows
+- Reverse-Z projection improves depth precision for large scenes
+- Stable planes enable multi-resolution path tracing for better denoising quality

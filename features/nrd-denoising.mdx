@@ -1,0 +1,350 @@
+---
+title: NRD Denoising
+description: NVIDIA Real-Time Denoisers for clean real-time path traced images
+---
+
+## Overview
+
+**NRD** (NVIDIA Real-Time Denoisers) is a collection of spatiotemporal denoisers designed specifically for ray traced rendering. RTXPT integrates NRD to denoise path traced output in real-time mode, providing clean images with minimal samples per pixel.
+
+<Info>
+NRD enables **interactive path tracing** by producing clean results with as few as **1-2 samples per pixel**, compared to hundreds or thousands needed without denoising.
+</Info>
+
+## Denoiser Methods
+
+RTXPT supports two NRD denoiser methods:
+
+### ReLAX (Relaxed Cone Tracing)
+
+Optimized for real-time performance with probabilistic ray tracing:
+
+- **Fast execution** with aggressive temporal accumulation
+- **Good for low sample counts** (1-2 SPP)
+- **Handles both diffuse and specular** in unified passes
+- **Best for real-time applications**
+
+From NrdConfig.h:18-23:
+```cpp
+enum class DenoiserMethod : uint32_t
+{
+    REBLUR,
+    RELAX,    // Default choice
+    MaxCount
+};
+```
+
+### ReBLUR (Recurrent Blur)
+
+Higher quality denoising with more sophisticated filtering:
+
+- **Better quality** at cost of performance
+- **Advanced hit distance reconstruction**
+- **Separate diffuse/specular processing**
+- **Good for higher SPP** (2-4 SPP)
+
+## Enabling NRD
+
+### In the UI
+
+NRD can be enabled under **Path tracer → Post processing**:
+
+```cpp
+// From SampleUI.cpp:756
+ImGui::Checkbox("Use standalone denoiser (NRD)", &m_ui.StandaloneDenoiser);
+```
+
+<Note>
+NRD executes **before TAA/DLSS/DLAA** pass and is only available in **realtime mode**.
+</Note>
+
+<Warning>
+NRD is **incompatible with DLSS Ray Reconstruction** (DLSS-RR), which has its own built-in denoising.
+</Warning>
+
+### Default Configuration
+
+From SampleUI.cpp:76-77:
+```cpp
+m_ui.RelaxSettings = NrdConfig::getDefaultRELAXSettings();
+m_ui.ReblurSettings = NrdConfig::getDefaultREBLURSettings();
+```
+
+## ReLAX Configuration
+
+### Core Settings
+
+From NrdConfig.cpp:15-47, RTXPT uses these optimized ReLAX settings:
+
+```cpp
+nrd::RelaxSettings settings;
+
+// Anti-firefly protection
+settings.enableAntiFirefly = true;
+
+// Disable prepass blur (better for probabilistic sampling)
+settings.diffusePrepassBlurRadius = 0.0f;
+settings.specularPrepassBlurRadius = 0.0f;
+
+// A-Trous wavelet filter iterations
+settings.atrousIterationNum = 5;  // Balance of quality and performance
+
+// Lobe-based filtering
+settings.lobeAngleFraction = 0.7f;
+settings.specularLobeAngleSlack = 0.2f;  // Hide noisy secondary bounces
+
+// Depth sensitivity
+settings.depthThreshold = 0.004f;
+```
+
+### Temporal Accumulation
+
+```cpp
+// Maximum accumulated frames
+settings.diffuseMaxAccumulatedFrameNum = 25;
+settings.specularMaxAccumulatedFrameNum = 40;  // More for specular
+
+// Fast accumulation for disocclusions
+settings.diffuseMaxFastAccumulatedFrameNum = 3;
+settings.specularMaxFastAccumulatedFrameNum = 5;
+```
+
+### Anti-Lag Settings
+
+Aggressive settings to reduce temporal lag:
+
+```cpp
+settings.antilagSettings.accelerationAmount = 0.95f;     // Fast response
+settings.antilagSettings.spatialSigmaScale = 0.5f;
+settings.antilagSettings.temporalSigmaScale = 0.25f;
+settings.antilagSettings.resetAmount = 0.95f;            // Quick reset
+```
+
+<Tip>
+**Why aggressive anti-lag?** RTXPT uses probabilistic sampling, so temporal stability is less critical than avoiding ghosting and lag artifacts.
+</Tip>
+
+## ReBLUR Configuration
+
+### Core Settings
+
+From NrdConfig.cpp:49-61:
+
+```cpp
+nrd::ReblurSettings settings;
+
+// Anti-firefly protection
+settings.enableAntiFirefly = true;
+
+// Hit distance reconstruction for better quality
+settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_5X5;
+
+// Maximum temporal accumulation
+settings.maxAccumulatedFrameNum = 50;
+```
+
+### Prepass Blur
+
+ReBLUR uses prepass blur, but reduced to preserve sharp shadows:
+
+```cpp
+// Reducing prepass blurs to maintain shadow detail
+settings.diffusePrepassBlurRadius = 15.0f;
+settings.specularPrepassBlurRadius = 40.0f;  // Larger for specular
+```
+
+## Path Space Decomposition
+
+NRD supports **up to 3-layer path space decomposition** in RTXPT:
+
+<Steps>
+  <Step title="Primary Surface">
+    Direct camera hits - usually the sharpest, most important layer
+  </Step>
+  <Step title="Secondary Bounces">
+    First diffuse/glossy bounce - helps denoise indirect lighting
+  </Step>
+  <Step title="Tertiary Bounces">
+    Additional bounces - optional, reduces noise in complex scenarios
+  </Step>
+</Steps>
+
+Each layer can be denoised separately with different settings optimized for that surface type.
+
+## Integration Details
+
+### Initialization
+
+From NrdIntegration.h:32-36:
+
+```cpp
+class NrdIntegration
+{
+public:
+    NrdIntegration(nvrhi::IDevice* device, nrd::Denoiser method);
+    bool Initialize(uint32_t width, uint32_t height, 
+                   donut::engine::ShaderFactory& shaderFactory);
+```
+
+### Denoiser Execution
+
+From NrdIntegration.h:39-52:
+
+```cpp
+void RunDenoiserPasses(
+    nvrhi::ICommandList* commandList,
+    const RenderTargets& renderTargets,
+    int pass,  // Which layer (0, 1, 2)
+    const donut::engine::PlanarView& view,
+    const donut::engine::PlanarView& viewPrev,
+    uint32_t frameIndex,
+    float disocclusionThreshold,
+    float disocclusionThresholdAlternate,
+    bool useDisocclusionThresholdAlternateMix,
+    float timeDeltaBetweenFrames,
+    bool enableValidation,
+    bool resetHistory,
+    const void* methodSettings  // RelaxSettings or ReblurSettings
+);
+```
+
+## Required G-Buffer Inputs
+
+NRD requires specific inputs from the path tracer:
+
+### Essential Buffers
+
+- **Radiance** - Noisy path traced color (RGB)
+- **View Z** - Linear depth from camera
+- **Normal** - World-space normals
+- **Motion Vectors** - Screen-space velocity for temporal reprojection
+
+### Optional But Recommended
+
+- **Hit Distance** - Ray travel distance (improves quality significantly)
+- **Roughness** - Surface roughness for specular denoising
+- **Diffuse/Specular Split** - Separate channels for better denoising
+
+## Performance Characteristics
+
+### Frame Time Impact
+
+| Denoiser | Resolution | Typical Cost | Quality |
+|----------|-----------|--------------|----------|
+| **None** | Any | 0ms | Very noisy at low SPP |
+| **ReLAX** | 1080p | 1-2ms | Clean, good for real-time |
+| **ReLAX** | 4K | 3-5ms | Clean, good for real-time |
+| **ReBLUR** | 1080p | 2-3ms | Higher quality |
+| **ReBLUR** | 4K | 5-8ms | Higher quality |
+
+### SPP Recommendations
+
+<CodeGroup>
+```txt ReLAX
+1 SPP  - Acceptable for fast motion
+2 SPP  - Good quality for most scenes
+4 SPP  - Very clean, diminishing returns
+```
+
+```txt ReBLUR  
+2 SPP  - Minimum recommended
+4 SPP  - Good quality
+8 SPP  - Excellent quality
+```
+</CodeGroup>
+
+## Tuning for Your Scene
+
+### Reducing Ghosting
+
+If you see temporal ghosting on moving objects:
+
+```cpp
+// ReLAX
+settings.diffuseMaxAccumulatedFrameNum = 15;      // Reduce from 25
+settings.antilagSettings.accelerationAmount = 0.99f;  // Increase from 0.95f
+
+// ReBLUR
+settings.maxAccumulatedFrameNum = 30;              // Reduce from 50
+```
+
+### Improving Stability
+
+If the image is too flickery:
+
+```cpp
+// ReLAX
+settings.atrousIterationNum = 6;                   // Increase from 5
+settings.diffuseMaxAccumulatedFrameNum = 40;       // Increase from 25
+
+// ReBLUR
+settings.diffusePrepassBlurRadius = 25.0f;         // Increase from 15.0f
+```
+
+### Preserving Detail
+
+If shadows or details are too blurry:
+
+```cpp
+// ReLAX
+settings.atrousIterationNum = 4;                   // Decrease from 5
+settings.depthThreshold = 0.002f;                  // Decrease from 0.004f
+
+// ReBLUR
+settings.diffusePrepassBlurRadius = 10.0f;         // Decrease from 15.0f
+```
+
+## Common Issues
+
+### Black/Incorrect Output
+
+<Warning>
+Ensure all required inputs are correctly bound:
+- Verify motion vectors are in screen-space pixels
+- Check normal vectors are in world-space
+- Confirm hit distance is positive and normalized
+</Warning>
+
+### Temporal Instability
+
+From NrdConfig.cpp:26:
+```cpp
+// Note about iteration count:
+// 5 is default; 4 gives better shadows but more boiling, 
+// 6 gives less boiling but loss in contact shadows
+settings.atrousIterationNum = 5;
+```
+
+Balance between `atrousIterationNum` and temporal accumulation.
+
+### Over-Blurring
+
+From NrdConfig.cpp:23-24:
+```cpp
+settings.diffusePrepassBlurRadius = 0.0f;   // Disabled for ReLAX
+settings.specularPrepassBlurRadius = 0.0f;  // Causes more issues than it solves
+```
+
+For ReLAX, prepass blur is disabled because probabilistic sampling works better without it.
+
+## Reference Mode
+
+<Note>
+**NRD is only available in realtime mode.** For reference mode, use the **Photo mode screenshot** feature which applies external OptiX denoising.
+</Note>
+
+From SampleUI.cpp:762-770:
+```cpp
+if (ImGui::Button("Photo mode screenshot"))
+    m_ui.ExperimentalPhotoModeScreenshot = true;
+if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Experimental: Saves a photo.bmp and applies\n"
+                     "denoising using command line tool that wraps OptiX and OIDN denoisers.");
+```
+
+## See Also
+
+- [NVIDIA NRD SDK](https://github.com/NVIDIA-RTX/NRD) - Official NRD repository
+- [NRD Documentation](https://github.com/NVIDIA-RTX/NRD/blob/main/README.md) - Detailed technical documentation
+- [RTXDI Integration](/features/rtxdi) - Works well with NRD for clean lighting
+- [DLSS Integration](/features/dlss-integration) - Alternative to NRD+TAA

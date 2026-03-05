@@ -1,0 +1,299 @@
+---
+title: Vulkan Setup
+description: Configure Vulkan rendering backend for RTX Path Tracing
+---
+
+## Overview
+
+RTX Path Tracing supports both DirectX 12 (default) and Vulkan rendering backends. Vulkan support requires additional configuration steps due to interactions with various included libraries.
+
+<Warning>
+Vulkan support is not enabled by default and needs manual configuration. Some features like SER (Shader Execution Reordering) and OMM (Opacity Micromaps) on Vulkan are currently work in progress.
+</Warning>
+
+## Prerequisites
+
+Before enabling Vulkan support, ensure you have:
+
+- **Vulkan SDK** (tested with VulkanSDK-1.3.290.0)
+- **DirectX Shader Compiler (DXC)** from Vulkan SDK for SPIR-V compilation
+- All [standard build requirements](/guides/building-from-source#requirements)
+
+## Setup Steps
+
+<Steps>
+  <Step title="Install Vulkan SDK">
+    Download and install the Vulkan SDK from [LunarG](https://vulkan.lunarg.com/).
+
+    **Recommended Version**: VulkanSDK-1.3.290.0
+
+    ```bash
+    # Verify installation
+    vulkaninfo --summary
+    ```
+
+    <Note>
+    The Vulkan SDK includes the DXC compiler needed for SPIR-V shader compilation.
+    </Note>
+  </Step>
+
+  <Step title="Clear CMake cache">
+    If you've previously configured the project, clear the CMake cache to ensure the correct DXC path is detected:
+
+    ```bash
+    # Remove the build directory
+    rm -rf build/
+    # Or delete CMakeCache.txt
+    rm build/CMakeCache.txt
+    ```
+
+    This ensures that `DXC_SPIRV_PATH` picks up the DXC compiler from the Vulkan SDK.
+  </Step>
+
+  <Step title="Enable Vulkan in CMake">
+    Configure CMake with Vulkan support enabled:
+
+    ```bash
+    cmake CMakeLists.txt -B ./build \
+      -DDONUT_WITH_VULKAN=ON \
+      -DNVRHI_WITH_VULKAN=ON
+    ```
+
+    **Key CMake Variables:**
+    - `DONUT_WITH_VULKAN=ON` - Enable Vulkan in Donut framework
+    - `NVRHI_WITH_VULKAN=ON` - Enable Vulkan in NVRHI rendering abstraction
+    - `DXC_SPIRV_PATH` - Auto-detected path to DXC in Vulkan SDK
+
+    <Note>
+    If `DXC_SPIRV_PATH` is not automatically set, manually specify it:
+    ```bash
+    -DDXC_SPIRV_PATH="C:/VulkanSDK/1.3.290.0/Bin/dxc.exe"
+    ```
+    </Note>
+  </Step>
+
+  <Step title="Build the project">
+    Build the project as usual:
+
+    ```bash
+    cmake --build ./build --config Release
+    ```
+
+    During the build, shaders will be compiled to SPIR-V for Vulkan in addition to DXIL for DirectX 12.
+  </Step>
+
+  <Step title="Run with Vulkan">
+    Use the `--vk` command-line parameter to run with Vulkan:
+
+    ```bash
+    bin/Rtxpt.exe --vk
+    ```
+
+    Or with a specific scene:
+
+    ```bash
+    bin/Rtxpt.exe --vk --scene bistro.scene.json
+    ```
+  </Step>
+</Steps>
+
+## CMake Configuration
+
+### Required Variables
+
+```cmake
+# Enable Vulkan backend
+option(DONUT_WITH_VULKAN ON "Enable the Vulkan version of Donut")
+option(NVRHI_WITH_VULKAN ON "Enable Vulkan in NVRHI")
+
+# DXC for SPIR-V compilation (auto-detected from Vulkan SDK)
+set(DXC_SPIRV_PATH "${DXC_CUSTOM_PATH}/dxc.exe" CACHE STRING "Path to embedded dxc file for SPIRV")
+```
+
+### Shader Compilation
+
+The CMake configuration sets up shader compilation for both backends:
+
+```cmake
+# Shader make configuration
+set(SHADERMAKE_DXC_VK_PATH "${DXC_PATH}" CACHE STRING "" FORCE)
+set(SHADERMAKE_FIND_DXC_VK OFF CACHE BOOL "" FORCE)
+```
+
+## Vulkan vs DirectX 12
+
+### Feature Parity
+
+| Feature | DirectX 12 | Vulkan |
+|---------|-----------|--------|
+| Path Tracing | ✅ Full | ✅ Full |
+| DLSS | ✅ Full | ✅ Full |
+| RTXDI (ReSTIR) | ✅ Full | ✅ Full |
+| NRD Denoising | ✅ Full | ✅ Full |
+| Shader Execution Reordering | ✅ Full | 🚧 Work in Progress |
+| Opacity Micromaps | ✅ Full | 🚧 Work in Progress |
+
+<Note>
+SER and OMM support on Vulkan is currently under development.
+</Note>
+
+## Known Issues
+
+<Warning>
+**Important Vulkan-specific issues to be aware of:**
+</Warning>
+
+### AMD GPU TDR
+
+**Issue**: Running Vulkan on AMD GPUs may trigger a TDR (Timeout Detection and Recovery) during TLAS building in scenes with null TLAS instances.
+
+**Workaround**: This is a known issue being investigated. Use DirectX 12 on AMD hardware if you encounter this problem.
+
+### Debug Layer Warnings
+
+**Issue**: Enabling the debug layer on Vulkan will show numerous warnings and errors.
+
+**Status**: Fixes are work in progress. These warnings do not necessarily indicate runtime problems.
+
+```bash
+# Avoid using debug layer with Vulkan for now
+# bin/Rtxpt.exe --vk --debug  # May show many warnings
+bin/Rtxpt.exe --vk  # Recommended
+```
+
+### Transparency Issues on AMD
+
+**Issue**: Black or incorrect transparencies/reflections on some AMD systems with latest drivers.
+
+**Status**: This is most likely a driver issue and has been reported to AMD.
+
+## Switching Between Backends
+
+### Runtime Selection
+
+You can choose the backend at runtime:
+
+```bash
+# Use DirectX 12 (default)
+bin/Rtxpt.exe
+
+# Use Vulkan
+bin/Rtxpt.exe --vk
+```
+
+### Build Both Backends
+
+When Vulkan is enabled in CMake, both backends are available:
+
+```cmake
+if (NVRHI_WITH_VULKAN OR NVRHI_WITH_DX12)
+    add_subdirectory(Rtxpt)
+endif()
+```
+
+Shaders are compiled for both backends:
+- **DirectX 12**: `bin/ShaderPrecompiled/*/dxil/`
+- **Vulkan**: `bin/ShaderPrecompiled/*/spirv/`
+
+## Debugging Vulkan
+
+### Enable Validation Layers
+
+Use the `--debug` flag to enable Vulkan validation layers:
+
+```bash
+bin/Rtxpt.exe --vk --debug
+```
+
+<Warning>
+Expect numerous warnings when using validation layers - fixes are in progress.
+</Warning>
+
+### RenderDoc Capture
+
+Vulkan builds work well with RenderDoc for frame analysis:
+
+1. Launch RenderDoc
+2. Set executable to `bin/Rtxpt.exe`
+3. Add `--vk` to command-line arguments
+4. Launch and capture frames
+
+### NVIDIA Nsight Graphics
+
+For NVIDIA GPUs, use Nsight Graphics for advanced profiling:
+
+```bash
+# Launch through Nsight Graphics
+# Set API to "Vulkan"
+```
+
+<Note>
+NVIDIA Nsight Graphics is the recommended tool for GPU performance tuning and debugging on both DirectX 12 and Vulkan.
+</Note>
+
+## Performance Considerations
+
+### Driver Overhead
+
+Vulkan typically has lower driver overhead compared to DirectX 12, which can result in:
+- Better CPU performance
+- More consistent frame times
+- Potentially higher FPS in CPU-bound scenarios
+
+### Shader Compilation
+
+First-run shader compilation may take longer with Vulkan due to SPIR-V pipeline compilation.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="DXC_SPIRV_PATH not found">
+    **Error**: CMake cannot find DXC compiler in Vulkan SDK
+
+    **Solution**:
+    1. Verify Vulkan SDK is installed
+    2. Clear CMake cache: `rm -rf build/CMakeCache.txt`
+    3. Manually set the path:
+    ```bash
+    cmake -DDXC_SPIRV_PATH="C:/VulkanSDK/1.3.290.0/Bin/dxc.exe" ...
+    ```
+  </Accordion>
+
+  <Accordion title="Vulkan runtime not found">
+    **Error**: Failed to load Vulkan library
+
+    **Solution**: Ensure the Vulkan runtime is installed:
+    - Check for `vulkan-1.dll` in system PATH
+    - Reinstall Vulkan SDK
+    - Update graphics drivers
+  </Accordion>
+
+  <Accordion title="No Vulkan-capable device found">
+    **Error**: Application reports no Vulkan devices
+
+    **Solution**:
+    - Update GPU drivers to latest version
+    - Verify GPU supports Vulkan 1.3: `vulkaninfo`
+    - Check if GPU supports ray tracing extensions
+  </Accordion>
+
+  <Accordion title="Shader compilation errors">
+    **Error**: SPIR-V shader compilation fails
+
+    **Solution**:
+    - Ensure DXC from Vulkan SDK is being used
+    - Check DXC version: `dxc --version`
+    - Rebuild with clean build directory
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Line Options" icon="terminal" href="/guides/command-line">
+    Learn about all available command-line flags
+  </Card>
+  <Card title="Scene Setup" icon="cube" href="/guides/scene-setup">
+    Configure scenes for rendering
+  </Card>
+</CardGroup>

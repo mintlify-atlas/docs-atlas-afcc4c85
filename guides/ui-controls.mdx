@@ -1,0 +1,538 @@
+---
+title: UI Controls
+description: Complete guide to the user interface panels, camera controls, and rendering settings
+---
+
+## Overview
+
+RTX Path Tracing provides a comprehensive UI for controlling rendering settings, scene management, and camera movement. The interface is built with Dear ImGui and provides real-time feedback.
+
+<Note>
+Press **F2** to toggle the UI visibility on/off.
+</Note>
+
+## UI Layout
+
+The main UI window appears on the left side of the screen:
+
+- **Primary Window**: Settings panel (left side)
+- **Top Controls**: Scene selection and quick settings (top-center)
+- **Keyboard Shortcut**: F2 to show/hide UI
+
+From the README:
+> "Once the application is running, most of the SDK features can be accessed via the UI window on the left hand side and drop-down controls in the top-center."
+
+## Camera Controls
+
+### Keyboard Movement
+
+- **W** - Move forward
+- **S** - Move backward  
+- **A** - Move left
+- **D** - Move right
+
+### Mouse Controls
+
+- **Left Mouse Button + Drag** - Rotate camera
+- **Right Mouse Button** - Pick pixel for debugging
+- **Mouse Scroll** - Adjust camera movement speed
+
+### Camera Settings (UI)
+
+Found under **Camera** section:
+
+```
+Camera
+├── Motion (dropdown)
+│   ├── Free flight
+│   └── Scene cam 0, 1, 2...
+├── Camera position
+│   ├── Save - Save to campos.txt
+│   └── Load - Load from campos.txt  
+├── Aperture (0.0 - 1.0)
+├── Focal Distance
+├── Keyboard move speed (0.1 - 10.0)
+├── Vertical FOV (degrees)
+└── CameraAntiRRSleepJitter
+```
+
+### Camera Motion Modes
+
+**Free Flight** (default):
+- WASD keyboard controls
+- Mouse drag to rotate
+- Full freedom of movement
+
+**Scene Cameras**:
+- Pre-defined camera positions from `.scene.json`
+- Animated camera paths
+- Can have custom exposure settings
+
+### Saving Camera Positions
+
+From `SampleUI.cpp:492`:
+```cpp
+if (currentlySelected == 0)
+{
+    ImGui::Text("Camera position: "); ImGui::SameLine();
+    if (ImGui::Button("Save", ImVec2(ImGui::GetFontSize() * 5.0f, ImGui::GetTextLineHeightWithSpacing()))) 
+        m_app.SaveCurrentCamera(); 
+    ImGui::SameLine();
+    if (ImGui::Button("Load", ImVec2(ImGui::GetFontSize() * 5.0f, ImGui::GetTextLineHeightWithSpacing()))) 
+        m_app.LoadCurrentCamera();
+}
+```
+
+## System Settings
+
+Found under **System** section:
+
+### Rendering Options
+
+- **Reload Shaders** - Hot-reload shaders (requires VS .hlsl→.bin build)
+  - Keyboard shortcut: `Ctrl+R`
+- **VSync** - Enable/disable vertical sync
+- **Cap fps to** - Frame rate limiter (disabled, 2, 5, 10, 15, 30, 60, 120)
+- **Render when out of focus** - Continue rendering when window is unfocused
+
+From `SampleUI.cpp:233`:
+```cpp
+if (ImGui::Button("Reload Shaders (requires VS .hlsl->.bin build)"))
+    m_ui.ShaderReloadRequested = true;
+ImGui::Checkbox("VSync", &m_ui.EnableVsync);
+```
+
+### Screenshot Tools
+
+Under **System → Screenshot tools**:
+
+**Basic Screenshot:**
+- **Save screenshot(s)** - Opens file dialog to save current frame
+
+**Advanced Options:**
+- **ResetAndDelay** - Reset temporal caches before screenshot
+  - Delay frames (0-10000) - Number of frames to wait before capture
+- **Sequence** - Capture multiple frames
+  - Length (1-999) - Number of frames in sequence
+
+From `SampleUI.cpp:260`:
+```cpp
+if (ImGui::Button("Save screenshot(s)", ImVec2(-FLT_MIN,0.0f)))
+{
+    std::string fileName;
+    if (FileDialog(false, "PNG files\0*.png\0BMP files\0*.bmp\0All files\0*.*\0\0", fileName))
+    {
+        m_ui.ScreenshotFileName = fileName;
+        if (m_ui.ScreenshotResetAndDelay)
+            m_app.ResetSceneTime();
+    }
+}
+```
+
+## Scene Management
+
+### Scene Selection
+
+**Scene** dropdown (top of UI):
+- Lists all `.scene.json` files in `Assets/` folder
+- Click to switch scenes
+- Scene reloads automatically
+
+From `SampleUI.cpp:329`:
+```cpp
+if (ImGui::BeginCombo("Scene", currentScene.c_str()))
+{
+    const std::vector<std::string>& scenes = m_app.GetAvailableScenes();
+    for (const std::string& scene : scenes)
+    {
+        bool is_selected = scene == currentScene;
+        if (ImGui::Selectable(scene.c_str(), is_selected))
+            m_app.SetCurrentScene(scene);
+    }
+    ImGui::EndCombo();
+}
+```
+
+### Scene Settings
+
+Under **Scene** section:
+
+**Texture Compression:**
+- Warning if uncompressed textures detected
+- **Batch compress with nvtt_export.exe** - Compress all textures
+
+**Animations:**
+- **Enable animations** - Toggle scene animations
+  - Keyboard shortcut: `Space` (when not in Reference mode)
+- **Reset animation time** - Reset to t=0
+
+**Interactive Elements:**
+- Game-specific interactive controls (if scene has them)
+
+**Togglables:**
+- Checkboxes for togglable scene nodes (suffixed with `_togglable`)
+
+From `SampleUI.cpp:380`:
+```cpp
+if (m_ui.TogglableNodes != nullptr && m_ui.TogglableNodes->size() > 0 && ImGui::CollapsingHeader("Togglables"))
+{
+    for (int i = 0; i < m_ui.TogglableNodes->size(); i++)
+    {
+        auto& node = (*m_ui.TogglableNodes)[i];
+        bool selected = node.IsSelected();
+        if (ImGui::Checkbox(node.UIName.c_str(), &selected))
+        {
+            node.SetSelected(selected);
+            m_ui.ResetAccumulation = true;
+        }
+    }
+}
+```
+
+### Environment Map
+
+Under **Scene → Environment Map**:
+
+**Settings:**
+- **Enabled** - Toggle environment lighting
+- **Source** - Shows current env map file
+- **Override** dropdown:
+  - Scene default
+  - Procedural sky (with time-of-day presets)
+  - Custom HDR/EXR files from `Assets/envmaps/`
+- **Tint Color** [RGB] - Color tint multiplier
+- **Intensity** - Brightness multiplier
+- **Rotation XYZ** - Rotate environment map
+
+**Procedural Sky Settings:**
+- Time of day presets
+- Sun position
+- Atmosphere parameters
+
+From `SampleUI.cpp:398`:
+```cpp
+RESET_ON_CHANGE(ImGui::Checkbox("Enabled", &m_ui.EnvironmentMapParams.Enabled));
+RESET_ON_CHANGE( ImGui::InputFloat3("Tint Color", (float*)&m_ui.EnvironmentMapParams.TintColor.x) );
+RESET_ON_CHANGE( ImGui::InputFloat("Intensity", &m_ui.EnvironmentMapParams.Intensity) );
+RESET_ON_CHANGE( ImGui::InputFloat3("Rotation XYZ", (float*)&m_ui.EnvironmentMapParams.RotationXYZ.x) );
+```
+
+### Materials
+
+Under **Scene → Materials**:
+- Material browser
+- Per-material settings
+- Texture visualization
+
+## Path Tracer Settings
+
+Under **Path tracer** section (expanded by default):
+
+### Rendering Mode
+
+**Mode** dropdown:
+- **Reference** - Accumulate samples for ground truth
+- **Realtime** - Real-time path tracing with denoising
+
+From `SampleUI.cpp:610`:
+```cpp
+int modeIndex = (m_ui.RealtimeMode)?(1):(0);
+if (ImGui::Combo("Mode", &modeIndex, "Reference\0Realtime\0\0"))
+{
+    m_ui.RealtimeMode = (modeIndex!=0);
+    m_ui.ResetAccumulation = true;
+}
+```
+
+### Setup (Reference Mode)
+
+- **Reset** - Reset accumulation buffer
+- **Sample count** (1 - 4,194,304) - Target samples per pixel
+- **Accumulated samples** - Current progress
+- **Pre-warm real-time caches** - Pre-fill temporal buffers
+- **Jitter anti-aliasing** - Pixel jitter for AA
+
+### Setup (Realtime Mode)
+
+- **Reset** - Reset temporal caches
+- **Samples per pixel** (1 - 64) - SPP per frame
+  - Note: Incompatible with ReSTIR DI & GI
+
+### Common Settings
+
+- **Max bounces** (0 - MAX_BOUNCE_COUNT) - Total path length
+- **Max diffuse bounces** - Separate diffuse limit
+  - Realtime mode: typically 3
+  - Reference mode: typically 8
+- **Texture MIP bias** - LOD bias for all textures
+- **Diffuse sample envmap MIP level** (0-16) - Sky sampling LOD
+- **Use Russian Roulette early out** - Stochastic path termination
+
+From `SampleUI.cpp:654`:
+```cpp
+RESET_ON_CHANGE(ImGui::InputInt("Max bounces", &m_ui.BounceCount));
+m_ui.BounceCount = dm::clamp(m_ui.BounceCount, 0, MAX_BOUNCE_COUNT);
+if (m_ui.RealtimeMode)
+    RESET_ON_CHANGE(ImGui::InputInt("Max diffuse bounces (realtime)", &m_ui.RealtimeDiffuseBounceCount));
+else
+    RESET_ON_CHANGE(ImGui::InputInt("Max diffuse bounces (reference)", &m_ui.ReferenceDiffuseBounceCount));
+```
+
+### Firefly Filter
+
+**Realtime Mode:**
+- **FireflyFilter (realtime)** - Enable smart firefly clamping
+- **FF Threshold** (0.00001 - 1000.0) - Clamp threshold
+- **RX** - Relax on non-noisy paths (higher clamp for direct light)
+
+**Reference Mode:**
+- **FireflyFilter (reference *)** - Enable for reference mode
+  - Note: Makes results non-deterministic with auto-exposure
+- **FF Threshold** (0.01 - 1000.0)
+
+### Post Processing
+
+**Realtime Mode:**
+
+**AA/SR/Denoising** dropdown:
+- **Disabled** - No anti-aliasing
+- **TAA** - Temporal anti-aliasing
+- **DLSS** - NVIDIA Deep Learning Super Sampling
+- **DLSS-RR** - DLSS + Ray Reconstruction
+
+**DLSS Quality** (when DLSS/DLSS-RR selected):
+- Ultra Performance
+- Performance
+- Balanced
+- Quality
+- DLAA (Deep Learning Anti-Aliasing)
+
+From `SampleUI.cpp:720`:
+```cpp
+const char* items[] = { "Disabled", "TAA", "DLSS", "DLSS-RR" };
+if (ImGui::BeginCombo("AA/SR/Denoising", items[m_ui.RealtimeAA]))
+{
+    // ... selection logic
+}
+```
+
+**Standalone Denoiser:**
+- **Use standalone denoiser (NRD)** - Enable NVIDIA Real-Time Denoisers
+  - Disabled when DLSS-RR is active
+
+**Reference Mode:**
+
+- **Photo mode screenshot** - Denoise with OptiX/OIDN
+  - Saves `photo.bmp` with denoised output
+  - Uses external command-line denoiser
+
+**Common:**
+- **Enable tone mapping** - Toggle tone mapping pass
+
+### Light Sampling
+
+**Realtime Mode:**
+
+- **Use ReSTIR DI (RTXDI)** - ReSTIR direct illumination
+  - Requires NEE enabled
+  - Incompatible with DLSS-RR (by default)
+- **Use ReSTIR GI (RTXDI)** - ReSTIR global illumination
+  - Incompatible with DLSS-RR (by default)
+
+**Common:**
+
+- **Use Next Event Estimation** - Direct light sampling (NEE)
+
+**NEE Settings:**
+- **Sampling technique** dropdown:
+  - Uniform
+  - Power+
+  - NEE-AT (Adaptive Temporal)
+- **Candidate samples** (1-16) - Candidates per full sample
+- **Full samples** (0-63) - Shadow-tested samples
+- **Boost samples on dominant surface** (0-16) - Extra samples on primary surface
+
+From `SampleUI.cpp:820`:
+```cpp
+RESET_ON_CHANGE(ImGui::InputInt("Candidate samples", &m_ui.NEECandidateSamples, 1));
+m_ui.NEECandidateSamples = dm::clamp(m_ui.NEECandidateSamples, 1, 16);
+RESET_ON_CHANGE(ImGui::InputInt("Full samples", &m_ui.NEEFullSamples, 1));
+m_ui.NEEFullSamples = dm::clamp(m_ui.NEEFullSamples, 0, 63);
+```
+
+### Performance
+
+**Shader Execution Reordering:**
+
+- **NVAPI HitObject codepath** - Use NVAPI extensions
+  - **NVAPI ReorderThreads** - Enable SER
+- **dx::HitObject codepath** - Use DirectX native extensions (Agility SDK 619+)
+  - **dx::MaybeReorderThreads** - Enable SER
+
+### Debugging
+
+- **Realtime noise** - Enable per-frame noise variation
+  - When disabled, noise seed is constant (useful for A/B testing)
+
+## Light Pre-processing
+
+Under **Light pre-processing** section:
+
+### Info and Statistics
+
+- Light count
+- Emissive triangle count
+- Importance sampling statistics
+
+### Distant Lighting
+
+- Environment map importance sampling settings
+- Directional light configuration
+
+### NEE-AT Settings
+
+**Temporal Feedback:**
+- **Global temporal feedback** - Scene-wide light importance
+  - **Global feedback ratio** (0.0 - 0.95)
+- **Local temporal feedback** - Per-tile light importance
+  - **Local feedback ratio** (0.0 - 0.95)
+- **BSDF vs NEE-AT MIS boost** (0.0 - 1000.0) - MIS weight tweak
+- **Distant vs Local initial importance** (0.01 - 100.0) - Balance distant/local lights
+- **Anti-lag pre-pass (experimental)** - Same-frame guidance
+
+From `SampleUI.cpp:558`:
+```cpp
+RESET_ON_CHANGE(ImGui::Checkbox("Global temporal feedback", &m_ui.NEEAT_GlobalTemporalFeedbackEnabled));
+if (m_ui.NEEAT_GlobalTemporalFeedbackEnabled)
+{
+    RESET_ON_CHANGE(ImGui::SliderFloat("Global feedback ratio", &m_ui.NEEAT_GlobalTemporalFeedbackRatio, 0.0f, 0.95f));
+}
+```
+
+## DLSS & Reflex Settings
+
+Under **DLSS & Reflex settings** (when DLSS enabled):
+
+### DLSS Configuration
+
+- **DLSS Quality** - Mode selection (duplicated from Path tracer)
+- **Sharpness** - Output sharpening amount
+
+### Frame Generation
+
+- **Enable DLSS-G** - Frame generation
+- **Multiplier** - Number of generated frames
+
+### NVIDIA Reflex
+
+- **Enable Reflex** - Low latency mode
+- **Mode** - Off / On / On + Boost
+
+## Tone Mapping
+
+Under **Tone Mapping** section:
+
+- **Operator** dropdown:
+  - Linear
+  - Reinhard
+  - Hable (Uncharted 2)
+  - ACES
+- **Auto Exposure** - Automatic exposure adjustment
+  - **Exposure Compensation** (-8.0 - 8.0)
+  - **Exposure Value Min/Max** - Auto exposure range
+- **Manual Exposure Value** - When auto-exposure disabled
+
+## NRD Denoiser Settings
+
+Under **NRD (Denoiser)** section:
+
+### RELAX Settings
+
+- Diffuse/Specular lobe selection
+- History clamping
+- Spatial variance estimation
+
+### REBLUR Settings
+
+- Anti-lag settings
+- History length
+- Blur radius
+
+## RTXDI (ReSTIR) Settings
+
+Under **RTXDI** section:
+
+### ReSTIR DI
+
+- **Initial sampling** - Local light candidates
+- **Temporal reuse** - Samples from previous frame
+- **Spatial reuse** - Samples from neighbors
+- **Bias correction** - MIS weights
+
+### ReSTIR GI
+
+- **Temporal reuse**
+- **Spatial reuse** 
+- **Final shading** - Reuse strategy
+
+### ReGIR (Grid-based)
+
+- **Mode** - Grid / Octree / Disabled
+- **Grid resolution**
+- **Cell size**
+
+## Keyboard Shortcuts Summary
+
+| Key | Action |
+|-----|--------|
+| `F2` | Toggle UI visibility |
+| `Space` | Toggle animations (realtime mode) |
+| `Ctrl+R` | Reload shaders |
+| `W/A/S/D` | Camera movement |
+| `F13` | Reflex PC Ping (if Streamline enabled) |
+
+From `Sample.cpp:675`:
+```cpp
+if (key == GLFW_KEY_SPACE && action == GLFW_PRESS && mods != GLFW_MOD_CONTROL && mods != GLFW_MOD_ALT)
+{
+    m_ui.EnableAnimations = !m_ui.EnableAnimations;
+    return true;
+}
+if( key == GLFW_KEY_F2 && action == GLFW_PRESS )
+    m_ui.ShowUI = !m_ui.ShowUI;
+if( key == GLFW_KEY_R && action == GLFW_PRESS && mods == GLFW_MOD_CONTROL )
+    m_ui.ShaderReloadRequested = true;
+```
+
+## Performance Monitoring
+
+The UI displays:
+
+- **Frame time** - Milliseconds per frame
+- **FPS** - Frames per second
+- **Resolution** - Render → Display resolution
+- **Scene stats** - Lights, materials, meshes, instances
+
+<Note>
+With DLSS-G (frame generation), the FPS counter shows effective FPS with an asterisk and notes the multiplier.
+</Note>
+
+From `Sample.cpp:842`:
+```cpp
+if (m_ui.DLSSGMultiplier != 1)
+    m_fpsInfo = StringFormat("%.3f ms/%d-frames* (%.1f FPS*) *DLSS-G", 
+        frameTime * 1e3, m_ui.DLSSGMultiplier, m_ui.DLSSGMultiplier / frameTime);
+else
+    m_fpsInfo = StringFormat("%.3f ms/frame (%.1f FPS)", frameTime * 1e3, 1.0 / frameTime);
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Line Options" icon="terminal" href="/guides/command-line">
+    Learn about command-line flags and automation
+  </Card>
+  <Card title="Scene Setup" icon="cube" href="/guides/scene-setup">
+    Configure scenes and assets
+  </Card>
+</CardGroup>

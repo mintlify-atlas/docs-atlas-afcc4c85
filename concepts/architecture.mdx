@@ -1,0 +1,426 @@
+---
+title: System Architecture
+description: Understand the RTX Path Tracing system architecture, including DirectX/Vulkan backends, Donut framework integration, and key components
+---
+
+## Overview
+
+RTX Path Tracing is built on the [Donut framework](https://github.com/NVIDIAGameWorks/donut), providing a clean abstraction over DirectX 12 and Vulkan ray tracing APIs. The architecture is designed to be approachable for learning while maintaining production-quality features.
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Application Layer                     │
+│                  (Sample.cpp/Sample.h)                  │
+└────────────────────┬────────────────────────────────────┘
+                     │
+        ┌────────────┼────────────┐
+        │            │            │
+┌───────▼──────┐ ┌──▼──────┐ ┌──▼─────────────┐
+│  UI Layer    │ │ Scene   │ │ Path Tracer    │
+│  (ImGui)     │ │ Graph   │ │ Core           │
+└──────────────┘ └─────────┘ └────┬───────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    │              │              │
+            ┌───────▼──────┐ ┌────▼────┐ ┌───────▼────────┐
+            │  Lighting    │ │ Denoiser│ │ Post-Process   │
+            │  (NEE/RTXDI) │ │  (NRD)  │ │ (TAA/DLSS)     │
+            └──────────────┘ └─────────┘ └────────────────┘
+                    │              │              │
+                    └──────────────┼──────────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │   Donut Framework Layer     │
+                    │  (Abstraction & Utilities)  │
+                    └──────────────┬──────────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    │                             │
+            ┌───────▼──────┐              ┌──────▼────────┐
+            │  DirectX 12  │              │    Vulkan     │
+            │  (DXR 1.1+)  │              │  (VK_KHR_*)   │
+            └──────────────┘              └───────────────┘
+```
+
+## Graphics API Backends
+
+### DirectX 12
+
+The primary and fully-supported backend:
+
+- **DXR 1.1+** required for ray tracing
+- **Agility SDK** integration for latest features
+  - DirectX native Shader Execution Reordering (SM 6.9)
+  - DirectX native Opacity Micromaps
+- **NVAPI integration** for extended NVIDIA features
+
+```cpp
+// DirectX 12 initialization in DeviceManager
+auto device = GetDevice();
+if (device->queryFeatureSupport(nvrhi::Feature::RayTracingOpacityMicromap))
+    m_ommBaker = std::make_shared<OmmBaker>(device, ...);
+```
+
+<Info>
+DirectX 12 Agility SDK version 717-preview enables native support for Shader Execution Reordering and Opacity Micromaps. A preview driver is required for testing on NVIDIA hardware.
+</Info>
+
+### Vulkan
+
+Vulkan support requires manual setup:
+
+1. Install Vulkan SDK (tested with 1.3.290.0)
+2. Enable CMake variables:
+   - `DONUT_WITH_VULKAN=ON`
+   - `NVRHI_WITH_VULKAN=ON`
+3. Launch with `--vk` command line parameter
+
+<Note>
+**Current Limitations:**
+- SER and OMM support is work in progress
+- Debug layer may show warnings (fixes in progress)
+- AMD GPU TDR issues with null TLAS instances
+</Note>
+
+## Donut Framework Integration
+
+Donut provides essential abstractions and utilities:
+
+### Core Components
+
+<Tabs>
+  <Tab title="Device Abstraction">
+    ```cpp
+    class ApplicationBase {
+        donut::app::DeviceManager* GetDeviceManager();
+        nvrhi::IDevice* GetDevice();
+        nvrhi::CommandListHandle m_commandList;
+    };
+    ```
+    Abstracts DirectX 12 and Vulkan device management, command list execution, and resource creation.
+  </Tab>
+  
+  <Tab title="Scene Graph">
+    ```cpp
+    class ExtendedScene : public donut::engine::Scene {
+        std::shared_ptr<SceneGraph> GetSceneGraph();
+        std::vector<MeshInstance> GetMeshInstances();
+        bool Load(const std::filesystem::path& sceneFileName);
+    };
+    ```
+    Manages scene hierarchy, animations, materials, and geometry. Extends base Scene with RTX PT-specific features.
+  </Tab>
+  
+  <Tab title="Shader Factory">
+    ```cpp
+    std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
+    
+    // Shader compilation with macros
+    m_shaderLibrary = m_shaderFactory->CreateShaderLibrary(
+        "app/PathTracerSample.hlsl", 
+        &combinedMacros);
+    ```
+    Handles shader compilation, caching, and hot-reload.
+  </Tab>
+</Tabs>
+
+### Virtual File System (VFS)
+
+Donut's VFS abstracts file access:
+
+```cpp
+m_RootFS = std::make_shared<vfs::RootFileSystem>();
+m_RootFS->mount("/ShaderPrecompiled/donut", frameworkShaderPath);
+m_RootFS->mount("/ShaderPrecompiled/app", appShaderPath);
+m_RootFS->mount("/ShaderPrecompiled/nrd", nrdShaderPath);
+```
+
+## Folder Structure
+
+```
+RTXPT/
+├── bin/                    # Compiled binaries and shaders
+├── build/                  # CMake build files
+├── Assets/                 # Scenes, models, textures
+├── Docs/                   # Documentation images
+├── External/               # Third-party libraries
+│   ├── donut/             # Donut framework
+│   ├── Streamline/        # NVIDIA Streamline (DLSS)
+│   ├── NRD/               # NVIDIA Real-time Denoiser
+│   ├── RTXDI/             # RTX Direct Illumination
+│   └── OMM/               # Opacity Micromaps SDK
+├── Support/                # Command-line tools
+├── Rtxpt/                  # ⭐ Main application code
+│   ├── Sample.cpp/.h      # Main entry points
+│   ├── PathTracer/        # Core path tracing implementation
+│   ├── Shaders/           # HLSL shader code
+│   │   └── PathTracer/    # Path tracer shaders
+│   ├── RTXDI/             # ReSTIR DI/GI integration
+│   ├── NRD/               # Denoiser integration
+│   ├── Lighting/          # Light baking and sampling
+│   ├── Materials/         # Material system
+│   └── OpacityMicroMap/   # OMM baker integration
+└── CMakeLists.txt
+```
+
+<Accordion title="Key Source Files">
+- **`Rtxpt/Sample.cpp/.h`**: Application entry point, main render loop, scene management
+- **`Rtxpt/Shaders/PathTracerSample.hlsl`**: Ray generation, hit, and miss shaders
+- **`Rtxpt/Shaders/PathTracer/PathTracer.hlsli`**: Core path tracing algorithms
+- **`Rtxpt/Shaders/PathTracer/Rendering/Materials/StandardBSDF.hlsli`**: Material BSDF
+- **`Rtxpt/PTPipelineBaker.cpp/.h`**: Ray tracing pipeline compilation
+</Accordion>
+
+## Key Components
+
+### Sample Class (Main Application)
+
+```cpp
+class Sample : public donut::app::ApplicationBase
+{
+    // Core systems
+    std::shared_ptr<ExtendedScene> m_scene;
+    std::shared_ptr<donut::engine::ShaderFactory> m_shaderFactory;
+    
+    // Path tracing pipeline variants
+    std::shared_ptr<PTPipelineVariant> m_ptPipelineReference;
+    std::shared_ptr<PTPipelineVariant> m_ptPipelineBuildStablePlanes;
+    std::shared_ptr<PTPipelineVariant> m_ptPipelineFillStablePlanes;
+    
+    // Lighting and denoising
+    std::shared_ptr<EnvMapBaker> m_envMapBaker;
+    std::shared_ptr<LightsBaker> m_lightsBaker;
+    std::unique_ptr<NrdIntegration> m_nrd[cStablePlaneCount];
+    std::unique_ptr<RtxdiPass> m_rtxdiPass;
+    
+    // Render targets
+    std::unique_ptr<RenderTargets> m_renderTargets;
+    
+    // Acceleration structures
+    nvrhi::rt::AccelStructHandle m_topLevelAS;
+};
+```
+
+### Pipeline Variants
+
+The path tracer compiles multiple shader variants:
+
+```cpp
+bool Sample::CreatePTPipeline(donut::engine::ShaderFactory& shaderFactory)
+{
+    // Reference mode - all bounces, accumulation
+    m_ptPipelineReference = m_ptPipelineBaker->CreateVariant(
+        "PathTracerSample.hlsl", 
+        {{ "PATH_TRACER_MODE", "PATH_TRACER_MODE_REFERENCE" }}
+    );
+    
+    // Build stable planes - first pass for denoising
+    m_ptPipelineBuildStablePlanes = m_ptPipelineBaker->CreateVariant(
+        "PathTracerSample.hlsl",
+        {{ "PATH_TRACER_MODE", "PATH_TRACER_MODE_BUILD_STABLE_PLANES" }}
+    );
+    
+    // Fill stable planes - second pass for denoising  
+    m_ptPipelineFillStablePlanes = m_ptPipelineBaker->CreateVariant(
+        "PathTracerSample.hlsl",
+        {{ "PATH_TRACER_MODE", "PATH_TRACER_MODE_FILL_STABLE_PLANES" }}
+    );
+}
+```
+
+### Acceleration Structure Management
+
+```cpp
+void Sample::CreateAccelStructs(nvrhi::ICommandList* commandList)
+{
+    // Create Bottom-Level Acceleration Structures (BLAS)
+    CreateBlases(commandList);
+    
+    // Create Top-Level Acceleration Structure (TLAS)
+    CreateTlas(commandList);
+}
+
+void Sample::BuildTLAS(nvrhi::ICommandList* commandList) const
+{
+    std::vector<nvrhi::rt::InstanceDesc> instances;
+    
+    for (const auto& instance : m_scene->GetSceneGraph()->GetMeshInstances())
+    {
+        const bool useOmmBLAS = m_ommBaker && 
+                               m_ommBaker->UIData().Enable && 
+                               hasAttachementOMM;
+        
+        instanceDesc.bottomLevelAS = useOmmBLAS ? 
+            mesh->AccelStructOMM.Get() : mesh->accelStruct.Get();
+        instances.push_back(instanceDesc);
+    }
+    
+    commandList->buildTopLevelAccelStruct(m_topLevelAS, 
+                                         instances.data(), 
+                                         instances.size());
+}
+```
+
+## Integrated SDKs
+
+### RTXDI (RTX Direct Illumination)
+
+Provides ReSTIR DI and ReSTIR GI for efficient direct and indirect lighting:
+
+```cpp
+std::unique_ptr<RtxdiPass> m_rtxdiPass;
+
+void Sample::RtxdiSetupFrame(
+    nvrhi::IFramebuffer* framebuffer,
+    PathTracerCameraData cameraData,
+    uint2 renderDims)
+{
+    m_rtxdiPass->PrepareForFrame(commandList, cameraData, renderDims);
+}
+```
+
+### NRD (NVIDIA Real-time Denoiser)
+
+Integrates ReLAX and ReBLUR denoisers with up to 3-layer path space decomposition:
+
+```cpp
+std::unique_ptr<NrdIntegration> m_nrd[cStablePlaneCount];
+
+void Sample::Denoise(nvrhi::IFramebuffer* framebuffer)
+{
+    for (int i = 0; i < activeStablePlaneCount; i++)
+    {
+        if (m_nrd[i])
+            m_nrd[i]->RunDenoiser(commandList, denoiserInputs);
+    }
+}
+```
+
+### OMM (Opacity Micromaps)
+
+Accelerates alpha-tested geometry using hardware-accelerated opacity micromaps:
+
+```cpp
+std::shared_ptr<OmmBaker> m_ommBaker;
+
+void Sample::CreateOpacityMicromaps()
+{
+    if (!m_ommBaker) return;
+    
+    m_ommBaker->BakeOpacityMicromaps(
+        commandList,
+        m_scene->GetSceneGraph()->GetMeshInstances()
+    );
+}
+```
+
+### Streamline (DLSS 4.0)
+
+Provides NVIDIA DLSS Super Resolution, Ray Reconstruction, Frame Generation, and Multi Frame Generation:
+
+```cpp
+#if DONUT_WITH_STREAMLINE
+donut::app::StreamlineInterface& streamline = 
+    GetDeviceManager()->GetStreamline();
+
+if (streamline.IsDLSSAvailable())
+{
+    streamline.SetDLSSOptions(dlssOptions);
+    streamline.EvaluateDLSS(commandList, dlssInputs);
+}
+#endif
+```
+
+## Shader Execution Reordering (SER)
+
+SER significantly improves ray tracing performance by reordering divergent shader threads:
+
+```cpp
+// DX SER API (SM 6.9)
+#if USE_DX_HIT_OBJECT_EXTENSION
+dx::HitObject hit = dx::HitObject::FromRayQuery(rayQuery);
+dx::MaybeReorderThread(hit, coherenceHint, numCoherenceHints);
+dx::HitObject::Invoke(hit, payload);
+#endif
+
+// NVAPI SER (fallback)
+#if USE_NVAPI_HIT_OBJECT_EXTENSION
+NvHitObject hit;
+NvMakeHitWithRecordIndex(recordIndex, SceneBVH, ...);
+NvReorderThread(hit, coherenceHint, numCoherenceHints);
+NvInvokeHitObject(SceneBVH, hit, payload);
+#endif
+```
+
+<Info>
+SER can provide 10-40% performance improvement depending on scene complexity and material diversity.
+</Info>
+
+## Render Loop
+
+```cpp
+void Sample::Render(nvrhi::IFramebuffer* framebuffer)
+{
+    // 1. Update camera and views
+    UpdateViews(framebuffer);
+    
+    // 2. Update lighting and environment
+    UpdateLighting(commandList);
+    
+    // 3. Update acceleration structures (if needed)
+    BuildTLAS(commandList);
+    
+    // 4. Path trace the scene
+    PathTrace(framebuffer, constants);
+    
+    // 5. Denoise (real-time mode)
+    if (m_ui.ActualUseStandaloneDenoiser())
+        Denoise(framebuffer);
+    
+    // 6. Post-process (TAA/DLSS, tone mapping, bloom)
+    PostProcessAA(framebuffer, reset);
+    PostProcessPreToneMapping(commandList, compositeView);
+    PostProcessPostToneMapping(commandList, compositeView);
+}
+```
+
+## Configuration System
+
+Core configuration is defined in `PathTracer/Config.h`:
+
+```cpp
+#define MAX_BOUNCE_COUNT                96      // Maximum path bounces
+#define SCENE_GEOMETRY_TYPES            (1u << GEOMETRY_TYPE_TRIANGLE_MESH)
+#define HIT_INFO_INSTANCE_ID_BITS       29      // Instance ID precision
+#define HIT_INFO_PRIMITIVE_INDEX_BITS   32      // Primitive index precision
+#define ActiveBSDF                      StandardBSDF
+#define ACTIVE_LOD_TEXTURE_SAMPLER      LOD_TEXTURE_SAMPLER_RAY_CONES
+#define cStablePlaneCount               3       // Denoising layers
+#define RTXPT_FIREFLY_FILTER            1       // Enable firefly filtering
+```
+
+## Resource Management
+
+RTX Path Tracing uses NVRHI for cross-API resource management:
+
+```cpp
+// Constant buffer
+m_constantBuffer = device->createBuffer(
+    nvrhi::utils::CreateVolatileConstantBufferDesc(
+        sizeof(SampleConstants), 
+        "SampleConstants", 
+        c_MaxRenderPassConstantBufferVersions * 2));
+
+// Textures via binding cache
+m_bindingCache = std::make_unique<engine::BindingCache>(GetDevice());
+
+// Descriptor tables for bindless resources
+m_DescriptorTable = std::make_shared<engine::DescriptorTableManager>(
+    device, m_bindlessLayout);
+```
+
+<Note>
+For detailed information about the two rendering modes (Reference and Real-time), see [Rendering Modes](/concepts/rendering-modes).
+</Note>

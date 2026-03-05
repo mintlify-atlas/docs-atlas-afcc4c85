@@ -1,0 +1,439 @@
+---
+title: Command-Line Options
+description: Complete reference for all command-line flags and arguments
+---
+
+## Overview
+
+RTX Path Tracing supports various command-line arguments for automated workflows, headless rendering, and configuration. All arguments are parsed using the cxxopts library.
+
+## Basic Usage
+
+```bash
+Rtxpt.exe [options]
+```
+
+### Help
+
+Display all available options:
+
+```bash
+Rtxpt.exe --help
+Rtxpt.exe -h
+```
+
+## Scene Selection
+
+### --scene
+
+Load a specific scene file at startup.
+
+**Syntax:**
+```bash
+--scene <filename.scene.json>
+-s <filename.scene.json>
+```
+
+**Example:**
+```bash
+Rtxpt.exe --scene programmer-art.scene.json
+Rtxpt.exe --scene bistro.scene.json
+Rtxpt.exe -s programmer-art.scene.json
+```
+
+**From README:**
+> `--scene` loads a specific .scene.json file; example: `--scene programmer-art.scene.json`
+
+<Note>
+The scene file must exist in the `Assets/` folder. Only the filename is needed, not the full path.
+</Note>
+
+## Window Configuration
+
+### --width and --height
+
+Set the window dimensions.
+
+**Syntax:**
+```bash
+--width <pixels>
+--height <pixels>
+```
+
+**Default Values:**
+- Width: 1920
+- Height: 1080
+
+**Example:**
+```bash
+Rtxpt.exe --width 3840 --height 2160
+Rtxpt.exe --width 1280 --height 720
+```
+
+**From README:**
+> `--width` and `--height` to set the window size; example: `--width 3840 --height 2160`
+
+### --fullscreen
+
+Start in fullscreen mode.
+
+**Syntax:**
+```bash
+--fullscreen
+-f
+```
+
+**Example:**
+```bash
+Rtxpt.exe --width 3840 --height 2160 --fullscreen
+Rtxpt.exe -f --width 2560 --height 1440
+```
+
+**From README:**
+> `--fullscreen` to start in full screen mode; example: `--width 3840 --height 2160 --fullscreen`
+
+## Graphics API Selection
+
+### --vk (Vulkan)
+
+Enable Vulkan rendering backend.
+
+**Syntax:**
+```bash
+--vk
+```
+
+**Example:**
+```bash
+Rtxpt.exe --vk
+Rtxpt.exe --vk --scene bistro.scene.json
+```
+
+**From README:**
+> `--vk` to enable Vulkan (see [Vulkan Setup](/guides/vulkan-setup))
+
+<Warning>
+Vulkan must be enabled during the CMake build with `DONUT_WITH_VULKAN=ON` and `NVRHI_WITH_VULKAN=ON`. See [Vulkan Setup Guide](/guides/vulkan-setup).
+</Warning>
+
+### --d3d12 (DirectX 12)
+
+Use DirectX 12 rendering (default).
+
+**Syntax:**
+```bash
+--d3d12
+```
+
+**Example:**
+```bash
+Rtxpt.exe --d3d12
+```
+
+<Note>
+DirectX 12 is the default API. This flag is optional and mainly for explicit specification.
+</Note>
+
+## Debugging
+
+### --debug
+
+Enable graphics API debug layer and validation.
+
+**Syntax:**
+```bash
+--debug
+-d
+```
+
+**Example:**
+```bash
+Rtxpt.exe --debug
+Rtxpt.exe --vk --debug
+```
+
+**What it enables:**
+- DirectX 12 debug layer
+- Vulkan validation layers
+- NVRHI validation layer
+- Additional error checking
+
+**From README:**
+> `--debug` to enable the graphics API debug layer or runtime, and additional validation layers.
+
+<Warning>
+Debug mode has significant performance overhead. Only use for development and debugging.
+</Warning>
+
+## Adapter Selection
+
+### --adapter
+
+Select a specific GPU by matching a string in the adapter name.
+
+**Syntax:**
+```bash
+--adapter <string>
+-a <string>
+```
+
+**Example:**
+```bash
+Rtxpt.exe --adapter NVIDIA
+Rtxpt.exe --adapter RTX
+Rtxpt.exe -a "RTX 4090"
+```
+
+<Note>
+Useful for systems with multiple GPUs. The string is matched against the GPU name (case-sensitive).
+</Note>
+
+## Automation & Headless Mode
+
+### --nonInteractive
+
+Disable popups and windows requiring user input.
+
+**Syntax:**
+```bash
+--nonInteractive
+```
+
+**Example:**
+```bash
+Rtxpt.exe --nonInteractive --scene bistro.scene.json
+```
+
+**Use cases:**
+- Automated testing
+- CI/CD pipelines
+- Scripted rendering
+
+### --noWindow
+
+Run without creating a window (headless mode).
+
+**Syntax:**
+```bash
+--noWindow
+```
+
+**Example:**
+```bash
+Rtxpt.exe --noWindow --screenshotFileName output.png --screenshotFrameIndex 100
+```
+
+<Note>
+Useful for command-line screenshot generation and automated rendering workflows.
+</Note>
+
+## Screenshot Capture
+
+### --screenshotFileName
+
+Specify a file to save a screenshot.
+
+**Syntax:**
+```bash
+--screenshotFileName <path>
+```
+
+**Example:**
+```bash
+Rtxpt.exe --screenshotFileName output.png
+Rtxpt.exe --screenshotFileName "C:/renders/frame_001.bmp"
+```
+
+### --screenshotFrameIndex
+
+Capture screenshot at a specific frame and exit.
+
+**Syntax:**
+```bash
+--screenshotFrameIndex <frame_number>
+```
+
+**Example:**
+```bash
+Rtxpt.exe --screenshotFileName output.png --screenshotFrameIndex 100
+```
+
+**Workflow:**
+1. Application loads scene
+2. Renders until frame `<frame_number>`
+3. Captures screenshot to `--screenshotFileName`
+4. Application terminates
+
+<Note>
+**Combined headless screenshot example:**
+```bash
+Rtxpt.exe --noWindow --nonInteractive \
+  --scene bistro.scene.json \
+  --width 1920 --height 1080 \
+  --screenshotFileName bistro_frame100.png \
+  --screenshotFrameIndex 100
+```
+</Note>
+
+## Command-Line Reference
+
+From the source code (`CommandLine.cpp:27`):
+
+```cpp
+options.add_options()
+    ("s,scene", "Preferred scene to load (.scene.json)", value(scene))
+    ("nonInteractive", "Indicates that RTXPT will start in non-interactive mode, disabling popups and windows that require input", value(nonInteractive))
+    ("noWindow", "Start PT-SDK without a window. This mode is useful when generating screenshots from command line.", value(noWindow))
+    ("d,debug", "Enables the D3D12/VK debug layer and NVRHI validation layer", value(debug))
+    ("width", "Window width", value(width))
+    ("height", "Window height", value(height))
+    ("f,fullscreen", "run in fullscreen mode", value(fullscreen))
+    ("a,adapter", "-adapter must be followed by a string used to match the preferred adapter, e.g -adapter NVIDIA or -adapter RTX", value(adapter))
+    ("screenshotFileName", "Will save a screenshot with the specified name.", value(screenshotFileName))
+    ("screenshotFrameIndex", "Will capture a screenshot at this specific frame index. Application will terminate after screenshot is taken.", value(screenshotFrameIndex))
+    ("h,help", "Print the help message", value(help))
+    ("d3d12", "Render using DirectX 12 (default)")
+    ("vk", "Render using Vulkan", value(useVulkan));
+```
+
+## Complete Examples
+
+### Load Scene in 4K Fullscreen
+
+```bash
+Rtxpt.exe --scene bistro.scene.json --width 3840 --height 2160 --fullscreen
+```
+
+### Vulkan with Debug Validation
+
+```bash
+Rtxpt.exe --vk --debug --scene programmer-art.scene.json
+```
+
+### Headless Screenshot Generation
+
+```bash
+Rtxpt.exe --noWindow --nonInteractive \
+  --scene bistro.scene.json \
+  --width 1920 --height 1080 \
+  --screenshotFileName renders/bistro_ref.png \
+  --screenshotFrameIndex 500
+```
+
+### Specific GPU Selection
+
+```bash
+Rtxpt.exe --adapter "RTX 4090" --scene bistro.scene.json
+```
+
+### Development with Hot Reload
+
+```bash
+Rtxpt.exe --debug --scene programmer-art.scene.json --width 1280 --height 720
+# Then use Ctrl+R in the UI to reload shaders
+```
+
+## Common Workflows
+
+### Automated Benchmarking
+
+```bash
+# Benchmark script example
+for scene in bistro programmer-art; do
+    Rtxpt.exe --noWindow --nonInteractive \
+      --scene ${scene}.scene.json \
+      --width 1920 --height 1080 \
+      --screenshotFileName benchmark_${scene}.png \
+      --screenshotFrameIndex 1000
+done
+```
+
+### Reference Rendering
+
+```bash
+# High quality reference render
+Rtxpt.exe --scene bistro.scene.json \
+  --width 3840 --height 2160 \
+  --fullscreen
+# Then in UI:
+# - Set Mode to "Reference"
+# - Set Sample count to 10000+
+# - Wait for completion
+# - Use "Photo mode screenshot"
+```
+
+### Cross-API Testing
+
+```bash
+# Test with DirectX 12
+Rtxpt.exe --d3d12 --scene programmer-art.scene.json
+
+# Test with Vulkan
+Rtxpt.exe --vk --scene programmer-art.scene.json
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Scene file not found">
+    **Error**: Cannot load scene file
+
+    **Solution**: Ensure the `.scene.json` file exists in the `Assets/` folder. Use only the filename, not the full path:
+    ```bash
+    # Correct
+    Rtxpt.exe --scene bistro.scene.json
+    
+    # Incorrect
+    Rtxpt.exe --scene Assets/bistro.scene.json
+    ```
+  </Accordion>
+
+  <Accordion title="Vulkan not available">
+    **Error**: `--vk` flag doesn't work
+
+    **Solution**: Vulkan must be enabled at build time:
+    ```bash
+    cmake -DDONUT_WITH_VULKAN=ON -DNVRHI_WITH_VULKAN=ON ...
+    ```
+    See [Vulkan Setup Guide](/guides/vulkan-setup).
+  </Accordion>
+
+  <Accordion title="Invalid command-line argument">
+    **Error**: Unrecognized option
+
+    **Solution**: Check spelling and use `--help` to see all options:
+    ```bash
+    Rtxpt.exe --help
+    ```
+  </Accordion>
+
+  <Accordion title="Screenshot not saved">
+    **Error**: Screenshot file not created
+
+    **Solution**: 
+    - Ensure the directory exists
+    - Check write permissions
+    - Use absolute path if needed:
+    ```bash
+    --screenshotFileName "C:/renders/output.png"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Environment Variables
+
+While not command-line arguments, these environment variables can affect behavior:
+
+- `VULKAN_SDK` - Path to Vulkan SDK (for shader compilation)
+- `NVAPI_PATH` - Path to NVAPI SDK (if using NVAPI extensions)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building from Source" icon="hammer" href="/guides/building-from-source">
+    Learn how to build RTX Path Tracing
+  </Card>
+  <Card title="Scene Setup" icon="cube" href="/guides/scene-setup">
+    Configure scenes and assets
+  </Card>
+</CardGroup>

@@ -1,0 +1,489 @@
+---
+title: "Material System"
+description: "BSDF implementation, material properties, and texture support in the path tracer"
+---
+
+## Overview
+
+The NVIDIA RTX Path Tracer implements a comprehensive physically-based material system based on Falcor's Standard BSDF. The system supports multiple lobes including diffuse, specular reflection and transmission, with full support for textured materials and nested dielectrics.
+
+## Material Data Structure
+
+Materials are stored in a compact GPU-friendly format:
+
+```hlsl
+#define RTXPT_MATERIAL_MAX_COUNT 32768
+
+struct PTMaterialData
+{
+    float3 BaseOrDiffuseColor;
+    uint Flags;
+
+    float3 SpecularColor;
+    int _padding0;
+
+    float3 EmissiveColor;
+    float ShadowNoLFadeout;
+
+    float Opacity;
+    float Roughness;
+    float Metalness;
+    float NormalTextureScale;
+
+    float _padding1;
+    float AlphaCutoff;
+    float TransmissionFactor;
+    uint BaseOrDiffuseTextureIndex;
+
+    uint MetalRoughOrSpecularTextureIndex;
+    uint EmissiveTextureIndex;
+    uint NormalTextureIndex;
+    uint OcclusionTextureIndex;
+
+    uint TransmissionTextureIndex;
+    float IoR;  // Index of refraction
+    float ThicknessFactor;
+    float DiffuseTransmissionFactor;
+
+    VolumePTConstants Volume;
+};
+```
+
+### Material Flags
+
+```hlsl
+static const int PTMaterialFlags_UseSpecularGlossModel = 0x00000001;
+static const int PTMaterialFlags_UseMetalRoughOrSpecularTexture = 0x00000004;
+static const int PTMaterialFlags_UseBaseOrDiffuseTexture = 0x00000008;
+static const int PTMaterialFlags_UseEmissiveTexture = 0x00000010;
+static const int PTMaterialFlags_UseNormalTexture = 0x00000020;
+static const int PTMaterialFlags_UseTransmissionTexture = 0x00000080;
+static const int PTMaterialFlags_MetalnessInRedChannel = 0x00000100;
+static const int PTMaterialFlags_ThinSurface = 0x00000200;
+static const int PTMaterialFlags_PSDExclude = 0x00000400;
+static const int PTMaterialFlags_EnableAsAnalyticLightProxy = 0x00000800;
+static const int PTMaterialFlags_IgnoreMeshTangentSpace = (1<<12);
+static const int PTMaterialFlags_NestedPriorityMask = 0xF0000000;
+static const int PTMaterialFlags_NestedPriorityShift = 28;
+```
+
+## Volume Properties
+
+Volume attenuation follows the glTF KHR_materials_volume extension:
+
+```hlsl
+struct VolumePTConstants
+{
+    float3 AttenuationColor;    // Color of volume absorption
+    float AttenuationDistance;  // Distance for attenuation
+};
+```
+
+## Standard BSDF
+
+The `StandardBSDF` implements a comprehensive material model with multiple lobes:
+
+```hlsl
+struct StandardBSDF
+{
+    StandardBSDFData data;  // BSDF parameters
+    float3 emission;        // Emitted radiance
+    
+    // Evaluate BSDF for given directions
+    float4 eval(const ShadingData shadingData, const float3 wo);
+    
+    // Importance sample the BSDF
+    bool sample(const ShadingData shadingData, 
+                const float4 preGeneratedSamples, 
+                out BSDFSample result, 
+                bool useImportanceSampling);
+    
+    // Evaluate PDF for a given direction
+    float evalPdf(const ShadingData shadingData, 
+                  const float3 wo, 
+                  bool useImportanceSampling);
+    
+    // Get material properties
+    BSDFProperties getProperties(const ShadingData shadingData);
+    
+    // Get active lobes
+    uint getLobes(const ShadingData shadingData);
+};
+```
+
+### BSDF Evaluation
+
+The eval function returns BSDF value with separate diffuse/specular components:
+
+```hlsl
+float4 eval(const ShadingData shadingData, const float3 wo)
+{
+    float3 wiLocal = shadingData.toLocal(shadingData.V);
+    float3 woLocal = shadingData.toLocal(wo);
+    
+    FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+    
+    // Returns float4(diffuse + specular RGB, specular average)
+    return bsdf.eval(wiLocal, woLocal);
+}
+```
+
+### BSDF Sampling
+
+Importance sampling generates scatter directions based on material properties:
+
+```hlsl
+bool sample(const ShadingData shadingData, 
+            const float4 preGeneratedSamples, 
+            out BSDFSample result, 
+            bool useImportanceSampling)
+{
+    float3 wiLocal = shadingData.toLocal(shadingData.V);
+    float3 woLocal = float3(0, 0, 0);
+    
+    FalcorBSDF bsdf = FalcorBSDF::make(shadingData, data);
+    bool valid = bsdf.sample(wiLocal, woLocal, result.pdf, result.weight, 
+                              result.lobe, result.lobeP, preGeneratedSamples);
+    
+    result.wo = shadingData.fromLocal(woLocal);
+    return valid;
+}
+```
+
+### BSDF Properties
+
+```hlsl
+struct BSDFProperties
+{
+    float3 emission;
+    float roughness;
+    float3 diffuseReflectionAlbedo;
+    float3 diffuseTransmissionAlbedo;
+    float3 specularReflectionAlbedo;
+    float3 specularTransmissionAlbedo;
+    float3 specularReflectance;
+    uint flags;
+};
+
+BSDFProperties getProperties(const ShadingData shadingData)
+{
+    BSDFProperties p;
+    p.emission = emission;
+    
+    // Clamp roughness for delta detection
+    float alpha = data.Roughness() * data.Roughness();
+    p.roughness = alpha < kMinGGXAlpha ? 0.f : data.Roughness();
+    
+    // Compute albedos
+    p.diffuseReflectionAlbedo = (1.f - data.DiffuseTransmission()) * 
+                                (1.f - data.SpecularTransmission()) * 
+                                data.Diffuse();
+    p.specularReflectionAlbedo = (1.f - data.SpecularTransmission()) * 
+                                 data.Specular();
+    // ...
+    
+    return p;
+}
+```
+
+## Lobe Types
+
+The BSDF system distinguishes between different scattering event types:
+
+```hlsl
+enum LobeType
+{
+    DiffuseReflection = 0x01,
+    SpecularReflection = 0x02,
+    DeltaReflection = 0x04,
+    DiffuseTransmission = 0x08,
+    SpecularTransmission = 0x10,
+    DeltaTransmission = 0x20,
+    
+    // Convenience masks
+    Reflection = DiffuseReflection | SpecularReflection | DeltaReflection,
+    Transmission = DiffuseTransmission | SpecularTransmission | DeltaTransmission,
+    Diffuse = DiffuseReflection | DiffuseTransmission,
+    Specular = SpecularReflection | SpecularTransmission,
+    Delta = DeltaReflection | DeltaTransmission,
+    NonDelta = Diffuse | Specular,
+    All = Reflection | Transmission
+};
+```
+
+## Diffuse BRDFs
+
+### Lambertian Diffuse
+
+Simple cosine-weighted diffuse reflection:
+
+```hlsl
+struct DiffuseReflectionLambert
+{
+    float3 albedo;
+    
+    float3 eval(const float3 wi, const float3 wo)
+    {
+        if (min(wi.z, wo.z) < kMinCosTheta) return float3(0, 0, 0);
+        return K_1_PI * albedo * wo.z;
+    }
+    
+    bool sample(const float3 wi, out float3 wo, out float pdf, 
+                out float3 weight, out uint lobe, out float lobeP, 
+                float3 preGeneratedSample)
+    {
+        wo = sample_cosine_hemisphere_concentric(preGeneratedSample.xy, pdf);
+        lobe = (uint)LobeType::DiffuseReflection;
+        
+        if (min(wi.z, wo.z) < kMinCosTheta)
+        {
+            weight = float3(0, 0, 0);
+            lobeP = 0.0;
+            return false;
+        }
+        
+        weight = albedo;
+        lobeP = 1.0;
+        return true;
+    }
+};
+```
+
+### Disney Diffuse
+
+Energy-conserving diffuse model with roughness-dependent retroreflection:
+
+```hlsl
+struct DiffuseReflectionDisney
+{
+    float3 albedo;
+    float roughness;
+    
+    float3 evalWeight(float3 wi, float3 wo)
+    {
+        float3 h = normalize(wi + wo);
+        float woDotH = dot(wo, h);
+        float fd90 = 0.5f + 2.f * woDotH * woDotH * roughness;
+        float fd0 = 1.f;
+        float wiScatter = evalFresnelSchlick(fd0, fd90, wi.z);
+        float woScatter = evalFresnelSchlick(fd0, fd90, wo.z);
+        return albedo * wiScatter * woScatter;
+    }
+};
+```
+
+## Specular BRDFs
+
+### GGX Microfacet Model
+
+The path tracer uses GGX (Trowbridge-Reitz) microfacet distribution:
+
+```hlsl
+// Minimum alpha to avoid numerical instability
+static const float kMinGGXAlpha = 0.0064f;
+
+// GGX sampling methods
+#define GGXSamplingNDF 0    // Sample normal distribution
+#define GGXSamplingVNDF 1   // Sample visible normal distribution
+#define GGXSamplingBVNDF 2  // Bounded VNDF sampling (default)
+
+#define GGXSampling GGXSamplingBVNDF
+```
+
+### Microfacet Reflection
+
+```hlsl
+struct SpecularReflectionMicrofacet
+{
+    float3 albedo;
+    float alpha;  // Roughness squared
+    
+    float3 eval(const float3 wi, const float3 wo)
+    {
+        if (min(wi.z, wo.z) < kMinCosTheta) return float3(0, 0, 0);
+        
+        float3 h = normalize(wi + wo);
+        float D = evalNdfGGX(alpha, h.z);
+        float G = evalMaskingSmithGGXSeparable(alpha, wi.z, wo.z);
+        float3 F = evalFresnelSchlick(albedo, 1.f, max(0.f, dot(wi, h)));
+        
+        return F * D * G / (4.f * wi.z * wo.z);
+    }
+};
+```
+
+## Fresnel Equations
+
+### Schlick Approximation
+
+```hlsl
+float3 evalFresnelSchlick(float3 f0, float3 f90, float cosTheta)
+{
+    float x = saturate(1.f - cosTheta);
+    float x2 = x * x;
+    float x5 = x * x2 * x2;
+    return lerp(f0, f90, x5);
+}
+```
+
+### Dielectric Fresnel
+
+```hlsl
+float evalFresnelDielectric(float eta, float cosThetaI)
+{
+    float sinThetaTSq = eta * eta * (1.f - cosThetaI * cosThetaI);
+    
+    // Total internal reflection
+    if (sinThetaTSq > 1.f) return 1.f;
+    
+    float cosThetaT = sqrt(1.f - sinThetaTSq);
+    
+    float Rs = (eta * cosThetaI - cosThetaT) / (eta * cosThetaI + cosThetaT);
+    float Rp = (cosThetaI - eta * cosThetaT) / (cosThetaI + eta * cosThetaT);
+    
+    return 0.5f * (Rs * Rs + Rp * Rp);
+}
+```
+
+## Transmission
+
+### Specular Transmission
+
+```hlsl
+struct SpecularTransmissionMicrofacet
+{
+    float3 transmissionAlbedo;
+    float alpha;
+    float eta;  // Relative IOR
+    
+    bool sample(const float3 wi, out float3 wo, out float pdf,
+                out float3 weight, out uint lobe, out float lobeP,
+                float3 preGeneratedSample)
+    {
+        // Sample microfacet normal
+        float3 h = sampleGGX_VNDF(alpha, wi, preGeneratedSample.xy, pdf);
+        
+        // Refract through microfacet
+        float wiDotH = dot(wi, h);
+        float etaInv = 1.f / eta;
+        float sinThetaTSq = etaInv * etaInv * (1.f - wiDotH * wiDotH);
+        
+        // Check for total internal reflection
+        if (sinThetaTSq >= 1.f)
+        {
+            weight = float3(0, 0, 0);
+            return false;
+        }
+        
+        float woDotH = sqrt(1.f - sinThetaTSq);
+        wo = etaInv * (-wi) + (etaInv * wiDotH - woDotH) * h;
+        
+        lobe = (uint)LobeType::SpecularTransmission;
+        lobeP = 1.0;
+        
+        // Compute weight
+        float F = evalFresnelDielectric(eta, abs(wiDotH));
+        float G = evalMaskingSmithGGXSeparable(alpha, wi.z, abs(wo.z));
+        weight = transmissionAlbedo * (1.f - F) * G;
+        
+        return true;
+    }
+};
+```
+
+## Nested Dielectrics
+
+The path tracer tracks nested transparent objects using an interior list:
+
+```hlsl
+#define INTERIOR_LIST_SLOT_COUNT 4
+
+struct InteriorList
+{
+    uint slots[INTERIOR_LIST_SLOT_COUNT];
+    
+    bool isEmpty();
+    uint getTopMaterialID();
+    void push(uint materialID, uint priority);
+    void pop(uint materialID, uint priority);
+};
+
+inline void UpdateNestedDielectricsOnScatterTransmission(
+    const ShadingData shadingData,
+    inout PathState path,
+    const WorkingContext workingContext)
+{
+    uint materialID = shadingData.materialID;
+    uint priority = shadingData.materialPriority;
+    
+    if (shadingData.frontFacing)
+        path.interiorList.push(materialID, priority);
+    else
+        path.interiorList.pop(materialID, priority);
+}
+```
+
+## Texture Sampling
+
+Textures are sampled with ray cone-based LOD:
+
+```hlsl
+float ComputeTextureLOD(RayCone rayCone, 
+                        float triangleArea,
+                        float2 uvGradients[2])
+{
+    float coneWidth = rayCone.getWidth();
+    float footprintArea = coneWidth * coneWidth;
+    
+    float uvArea = abs(uvGradients[0].x * uvGradients[1].y - 
+                       uvGradients[0].y * uvGradients[1].x);
+    
+    float lambda = 0.5f * log2(footprintArea / uvArea);
+    return lambda;
+}
+```
+
+## Material Loading
+
+The Bridge interface loads material data:
+
+```hlsl
+SurfaceData Bridge::loadSurface(
+    const OptimizationHints optimizationHints,
+    const TriangleHit triangleHit,
+    const float3 rayDir,
+    const RayCone rayCone,
+    const uint vertexIndex,
+    const uint2 pixelPos,
+    DebugContext debug)
+{
+    // Load vertex attributes
+    // Sample textures with LOD
+    // Construct ShadingData
+    // Build BSDF
+    
+    return surfaceData;
+}
+```
+
+## Optimization Hints
+
+The system uses optimization hints to skip unnecessary computations:
+
+```hlsl
+struct OptimizationHints
+{
+    bool NoTextures;      // Skip texture sampling
+    bool NoTransmission;  // Skip transmission calculations
+    bool OnlyDeltaLobes;  // Only delta (mirror) events
+    
+    static OptimizationHints make(bool noTextures, 
+                                   bool noTransmission, 
+                                   bool onlyDeltaLobes);
+};
+```
+
+## Related Topics
+
+- [Overview](/api/path-tracer/overview) - Path tracer architecture
+- [Lighting](/api/path-tracer/lighting) - Light sampling and NEE

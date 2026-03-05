@@ -1,0 +1,346 @@
+---
+title: "Path Tracer Overview"
+description: "Architecture and core components of the NVIDIA RTX path tracing system"
+---
+
+## Overview
+
+The NVIDIA RTX Path Tracer implements a physically-based rendering system using hardware-accelerated ray tracing. The path tracer supports multiple operating modes, advanced material models, next event estimation (NEE), and Shader Execution Reordering (SER) for optimal performance.
+
+## Architecture
+
+The path tracer is organized around several key components:
+
+- **Ray Generation Shader**: Entry point that initializes paths and drives the main loop
+- **Hit Shaders**: Process ray-geometry intersections and material evaluation
+- **Miss Shader**: Handles environment map sampling when rays miss geometry
+- **Path State**: Compact representation of all path data including throughput, direction, and bounces
+
+## Path Tracer Modes
+
+The system supports three operating modes controlled by `PATH_TRACER_MODE`:
+
+### Reference Mode
+```cpp
+PATH_TRACER_MODE_REFERENCE
+```
+Basic path tracing without stable planes optimization.
+
+### Build Stable Planes Mode
+```cpp
+PATH_TRACER_MODE_BUILD_STABLE_PLANES
+```
+Generates stable plane data for reuse in subsequent frames.
+
+### Fill Stable Planes Mode
+```cpp
+PATH_TRACER_MODE_FILL_STABLE_PLANES
+```
+Continues path tracing from previously computed stable planes, improving performance.
+
+## Ray Generation Shader
+
+The main ray generation shader coordinates the entire path tracing process:
+
+```hlsl
+[shader("raygeneration")]
+void RayGen()
+{
+    uint2 pixelPos = DispatchRaysIndex().xy;
+    PathState path;
+
+    // Initialize empty path
+    path = PathTracer::EmptyPathInitialize(pixelPos, g_Const.ptConsts.camera.PixelConeSpreadAngle);
+    PathTracer::SetupPathPrimaryRay(path, Bridge::computeCameraRay(pixelPos));
+
+    PathTracer::WorkingContext workingContext = GetWorkingContext(path);
+    PathTracer::StartPixel(path, workingContext);
+
+    // Main path tracing loop
+    while (path.isActive())
+        nextHit(path, workingContext, false);
+    
+    // Store final radiance
+    PathTracer::CommitPixel(path, workingContext);
+}
+```
+
+## Path State Management
+
+The `PathState` structure contains all information about a path as it traverses the scene:
+
+```hlsl
+struct PathState
+{
+    uint id;                        // Pixel identifier
+    uint flagsAndVertexIndex;       // Packed flags and bounce counter
+    float sceneLength;              // Total distance traveled
+    float fireflyFilterK;           // Firefly filtering coefficient
+    uint packedCounters;            // Various bounce counters
+    
+    float3 origin;                  // Current ray origin
+    float3 dir;                     // Current ray direction
+    float3 thp;                     // Path throughput
+    float thpRuRuCorrection;        // Russian roulette correction
+    
+    RayCone rayCone;                // Ray cone for texture LOD
+    InteriorList interiorList;      // Nested dielectrics tracking
+};
+```
+
+### Path Initialization
+
+```hlsl
+inline PathState EmptyPathInitialize(uint2 pixelPos, float pixelConeSpreadAngle)
+{
+    PathState path;
+    path.id = PathIDFromPixel(pixelPos);
+    path.flagsAndVertexIndex = 0;
+    path.sceneLength = 0;
+    path.fireflyFilterK = 1.0;
+    path.packedCounters = 0;
+    
+    path.origin = float3(0, 0, 0);
+    path.dir = float3(0, 0, 0);
+    path.thp = float3(1, 1, 1);
+    path.thpRuRuCorrection = 1.0;
+    
+    path.setHitPacked(HitInfo::make().getData());
+    path.setActive();
+    path.setDeltaOnlyPath(true);
+    path.rayCone = RayCone::make(0, pixelConeSpreadAngle);
+    
+    return path;
+}
+```
+
+## Hit Processing
+
+The `HandleHit` function processes ray-surface intersections:
+
+```hlsl
+inline void HandleHit(const uniform OptimizationHints optimizationHints, 
+                      inout PathState path, 
+                      const float3 rayOrigin, 
+                      const float3 rayDir, 
+                      const float rayTCurrent, 
+                      const WorkingContext workingContext)
+{
+    // Update path travel distance and ray cone
+    UpdatePathTravelled(path, rayOrigin, rayDir, rayTCurrent, workingContext);
+    
+    // Load surface and material data
+    const TriangleHit triangleHit = TriangleHit::make(path.hitPacked);
+    SurfaceData bridgedData = Bridge::loadSurface(optimizationHints, triangleHit, 
+                                                    rayDir, path.rayCone, 
+                                                    path.getVertexIndex(), 
+                                                    path.GetPixelPos(), 
+                                                    workingContext.Debug);
+    
+    const ShadingData shadingData = bridgedData.shadingData;
+    const ActiveBSDF bsdf = bridgedData.bsdf;
+    
+    // Handle volume absorption for nested dielectrics
+    if (!path.interiorList.isEmpty())
+    {
+        const uint materialID = path.interiorList.getTopMaterialID();
+        const HomogeneousVolumeData hvd = Bridge::loadHomogeneousVolumeData(materialID);
+        const float3 transmittance = HomogeneousVolumeSampler::evalTransmittance(hvd, rayTCurrent);
+        UpdatePathThroughput(path, transmittance);
+    }
+    
+    // Process emissive surfaces with MIS
+    BSDFProperties bsdfProperties = bsdf.getProperties(shadingData);
+    if (any(bsdfProperties.emission > 0))
+    {
+        // Compute MIS weight and accumulate radiance
+        float3 radiance = path.thp * bsdfProperties.emission;
+        AccumulatePathRadiance(workingContext, path, radiance, ...);
+    }
+    
+    // Perform next event estimation (direct lighting)
+    NEEResult neeResult = HandleNEE(optimizationHints, path, shadingData, 
+                                     bsdf, sampleGeneratorVertexBase, workingContext);
+    
+    // Generate scatter ray for next bounce
+    bool scatterValid = GenerateScatterRay(shadingData, bsdf, path, 
+                                            sampleGeneratorVertexBase, workingContext);
+    
+    // Apply Russian roulette path termination
+    if (HandleRussianRoulette(path, sampleGeneratorVertexBase, workingContext))
+        path.setTerminateAtNextBounce();
+}
+```
+
+## Miss Shader
+
+The miss shader handles environment lighting:
+
+```hlsl
+inline void HandleMiss(inout PathState path, 
+                       const float3 rayOrigin, 
+                       const float3 rayDir, 
+                       const float rayTCurrent, 
+                       const WorkingContext workingContext)
+{
+    UpdatePathTravelled(path, rayOrigin, rayDir, rayTCurrent, workingContext);
+    
+    // Sample environment map
+    EnvMap envMap = Bridge::CreateEnvMap();
+    float3 localDir = envMap.ToLocal(path.dir);
+    float mipLevel = (path.getCounter(PackedCounters::DiffuseBounces) > 1) ? 
+                     (Bridge::DiffuseEnvironmentMapMIPOffset()) : (0);
+    float3 Le = envMap.EvalLocal(localDir, mipLevel);
+    
+    // Compute MIS weight if NEE was used
+    float misWeight = 1.0f;
+    if (misInfo.LightSamplingEnabled && path.bsdfScatterPdf != 0)
+    {
+        LightSampler lightSampler = Bridge::CreateLightSampler(path.GetPixelPos(), 
+                                                                misInfo.LightSamplingIsIndirect);
+        uint environmentQuadLightIndex = lightSampler.LookupEnvLightByDirection(localDir);
+        misWeight = lightSampler.ComputeBSDFMISForEnvironmentQuad(environmentQuadLightIndex, 
+                                                                    path.bsdfScatterPdf, 
+                                                                    misInfo.LocalNEESamples, 
+                                                                    misInfo.TotalSamples);
+    }
+    
+    float3 environmentEmission = misWeight * Le;
+    float3 radiance = path.thp * environmentEmission;
+    AccumulatePathRadiance(workingContext, path, radiance, ...);
+    
+    path.terminate();
+}
+```
+
+## Shader Execution Reordering (SER)
+
+The path tracer supports SER for improved GPU occupancy through two APIs:
+
+### NVIDIA API (NVAPI)
+```hlsl
+#if USE_NVAPI_HIT_OBJECT_EXTENSION
+    NvHitObject hit;
+    // ... setup hit object ...
+    NvReorderThread(hit, (terminateAtNextBounce)?(1):(0), 1);
+    NvInvokeHitObject(SceneBVH, hit, payload);
+#endif
+```
+
+### DirectX API
+```hlsl
+#if USE_DX_HIT_OBJECT_EXTENSION
+    dx::HitObject hit = dx::HitObject::FromRayQuery(rayQuery);
+    dx::MaybeReorderThread(hit, (terminateAtNextBounce)?(1):(0), 1);
+    dx::HitObject::Invoke(hit, payload);
+#endif
+```
+
+## Ray Cone Tracing
+
+Ray cones are used for texture level-of-detail computation:
+
+```hlsl
+struct RayCone
+{
+    float width;          // Cone width at current position
+    float spreadAngle;    // Cone spread angle
+    
+    static RayCone make(float width, float spreadAngle);
+    
+    // Propagate cone along ray
+    RayCone propagateDistance(float t)
+    {
+        RayCone result;
+        result.width = width + spreadAngle * t;
+        result.spreadAngle = spreadAngle;
+        return result;
+    }
+};
+```
+
+## Russian Roulette
+
+Path termination uses Russian roulette to maintain unbiased results:
+
+```hlsl
+inline bool HandleRussianRoulette(inout PathState path, 
+                                   const SampleGeneratorVertexBase sgBase, 
+                                   const WorkingContext workingContext)
+{
+    SampleGenerator sampleGenerator = SampleGenerator::make(sgBase, 
+                                                             SampleGeneratorEffectSeed::RussianRoulette, 
+                                                             false);
+    
+    const float rrVal = sqrt(Luminance(path.thp));
+    float prob = saturate(0.85 - rrVal);
+    prob = prob * prob;
+    
+    // Increase termination probability with bounce count
+    prob = saturate(prob + max(0, ((float)path.getVertexIndex() / 
+                                    (float)Bridge::getMaxBounceLimit() - 0.4)));
+    
+    if (sampleNext1D(sampleGenerator) < prob)
+        return true;
+    
+    path.thpRuRuCorrection = 1.0 / (1.0 - prob);
+    return false;
+}
+```
+
+## Configuration Constants
+
+```hlsl
+namespace PathTracer
+{
+    static const bool kUseBSDFSampling = true;
+    static const float kSpecularRoughnessThreshold = 0.25f;
+    static const uint kMaxRejectedHits = 16;
+}
+```
+
+## Pipeline Variants
+
+The `PTPipelineBaker` manages multiple shader variants for optimization:
+
+```cpp
+struct HitGroupInfo
+{
+    std::string ExportName;
+    std::string ClosestHitShader;
+    std::string AnyHitShader;
+};
+
+class PTPipelineBaker
+{
+    void Update(const std::shared_ptr<ExtendedScene>& scene, 
+                unsigned int subInstanceCount,
+                const std::function<void(std::vector<ShaderMacro>&)>& globalMacrosGetter,
+                bool forceShaderReload);
+    
+    std::shared_ptr<PTPipelineVariant> CreateVariant(
+        const std::string& relativeSourcePath,
+        std::vector<ShaderMacro> variantMacros);
+};
+```
+
+### Closest Hit Variants
+
+Multiple closest hit shader variants are compiled with different optimization hints:
+
+```hlsl
+// Macro generates 8 variants based on:
+// - NoTextures: Skip texture sampling
+// - NoTransmission: Skip transmission calculations  
+// - OnlyDeltaLobes: Only delta (specular) events
+
+CLOSEST_HIT_VARIANT(000, false, false, false);
+CLOSEST_HIT_VARIANT(001, false, false, true);
+CLOSEST_HIT_VARIANT(010, false, true, false);
+// ... 5 more variants
+```
+
+## Related Topics
+
+- [Materials](/api/path-tracer/materials) - Material system and BSDF implementation
+- [Lighting](/api/path-tracer/lighting) - Next event estimation and light sampling

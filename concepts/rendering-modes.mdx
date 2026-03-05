@@ -1,0 +1,517 @@
+---
+title: Rendering Modes
+description: Understanding the difference between Reference and Real-time rendering modes, when to use each, and their performance characteristics
+---
+
+## Overview
+
+RTX Path Tracing supports two distinct rendering modes optimized for different use cases:
+
+<CardGroup cols={2}>
+  <Card title="Reference Mode" icon="camera">
+    Offline, ground-truth rendering with progressive accumulation. Ideal for final-quality renders and photo mode.
+  </Card>
+  <Card title="Real-time Mode" icon="bolt">
+    Interactive rendering with denoising. Optimized for real-time preview and gameplay scenarios.
+  </Card>
+</CardGroup>
+
+## Reference Mode
+
+### Overview
+
+Reference mode implements unbiased Monte Carlo path tracing with progressive accumulation. Each frame adds one or more samples per pixel, gradually converging to a noise-free result.
+
+### Key Characteristics
+
+<Tabs>
+  <Tab title="Rendering">
+    - **Progressive accumulation** over many frames
+    - **High sample count** (typically 512-4096+ samples)
+    - **All bounces enabled** (up to 24+ bounces)
+    - **No spatial/temporal filtering**
+    - **Ground truth quality** converges to reference solution
+  </Tab>
+  
+  <Tab title="Configuration">
+    ```cpp
+    // Reference mode settings
+    m_ui.RealtimeMode = false;
+    m_ui.BounceCount = 24;                    // Total bounces
+    m_ui.ReferenceDiffuseBounceCount = 6;     // Max diffuse bounces
+    m_ui.AccumulationTarget = 4096;           // Target samples/pixel
+    m_ui.ReferenceFireflyFilterThreshold = 5.0f;
+    ```
+  </Tab>
+  
+  <Tab title="Pipeline">
+    ```cpp
+    #define PATH_TRACER_MODE PATH_TRACER_MODE_REFERENCE
+    
+    // Single pass - trace all bounces
+    m_ptPipelineReference = m_ptPipelineBaker->CreateVariant(
+        "PathTracerSample.hlsl",
+        {{ "PATH_TRACER_MODE", "PATH_TRACER_MODE_REFERENCE" }}
+    );
+    ```
+  </Tab>
+</Tabs>
+
+### Accumulation Strategy
+
+```cpp
+void Sample::Render(nvrhi::IFramebuffer* framebuffer)
+{
+    if (!m_ui.RealtimeMode)
+    {
+        // Reference mode: accumulate samples over frames
+        if (m_accumulationSampleIndex < m_ui.AccumulationTarget)
+        {
+            // Path trace one sample
+            PathTrace(framebuffer, constants);
+            
+            // Accumulate into buffer
+            m_accumulationPass->Render(
+                commandList,
+                m_accumulationSampleIndex,
+                m_ui.AccumulationTarget
+            );
+            
+            m_accumulationSampleIndex++;
+        }
+    }
+}
+```
+
+### Sample Budget
+
+Reference mode uses all available ray budget for quality:
+
+- **Samples per pixel**: 1 per frame, accumulated over many frames
+- **Bounce depth**: Full (24+ bounces typical)
+- **Light samples**: Multiple NEE samples per vertex (2-4 full samples)
+- **No denoising**: Relies on accumulation for clean result
+
+### Use Cases
+
+<AccordionGroup>
+  <Accordion title="Photo Mode Screenshots">
+    Enable **Experimental Photo Mode Screenshot** for OptiX-denoised high-quality captures:
+    
+    ```cpp
+    m_ui.ExperimentalPhotoModeScreenshot = true;
+    ```
+    
+    This captures a reference-quality render and applies OptiX denoiser for publication-ready images.
+  </Accordion>
+  
+  <Accordion title="Quality Validation">
+    Use reference mode as ground truth to validate real-time mode optimizations:
+    - Compare denoised output vs. converged reference
+    - Validate material appearance
+    - Verify lighting accuracy
+  </Accordion>
+  
+  <Accordion title="Final Renders">
+    For non-interactive renders where quality is paramount:
+    - Marketing screenshots
+    - Cinematics pre-vis
+    - Architecture visualization
+  </Accordion>
+</AccordionGroup>
+
+### Firefly Filtering
+
+Reference mode uses conservative firefly filtering:
+
+```cpp
+if (m_ui.ReferenceFireflyFilterEnabled)
+{
+    // Conservative threshold - preserve detail
+    const float threshold = m_ui.ReferenceFireflyFilterThreshold; // 5.0
+    radiance = ClampFireflies(radiance, threshold);
+}
+```
+
+<Note>
+Reference mode resets accumulation on any camera movement or scene change. Use the **Lock Camera** feature to prevent accidental resets during long accumulation runs.
+</Note>
+
+## Real-time Mode
+
+### Overview
+
+Real-time mode uses a sophisticated **stable planes** technique with denoising to achieve interactive frame rates while maintaining visual quality.
+
+### Stable Planes Architecture
+
+Real-time mode operates in **two passes** per frame:
+
+<Steps>
+  <Step title="Build Stable Planes (First Pass)">
+    Traces low-roughness (near-specular) paths to identify stable surface layers:
+    
+    ```cpp
+    #define PATH_TRACER_MODE PATH_TRACER_MODE_BUILD_STABLE_PLANES
+    
+    // Trace only delta/near-delta paths (mirror-like)
+    // Stop at diffuse surfaces → create denoising planes
+    // Capture stable radiance (direct lighting, reflections)
+    ```
+    
+    This pass identifies up to **3 stable planes** (configurable) per pixel for denoising.
+  </Step>
+  
+  <Step title="Fill Stable Planes (Second Pass)">
+    Traces noisy paths from each stable plane:
+    
+    ```cpp
+    #define PATH_TRACER_MODE PATH_TRACER_MODE_FILL_STABLE_PLANES
+    
+    // Start from stable plane 0 (primary surface)
+    // Trace noisy diffuse/glossy bounces
+    // Output separate buffers per plane for denoising
+    ```
+  </Step>
+  
+  <Step title="Denoise Each Plane">
+    Apply NRD denoiser to each stable plane separately:
+    
+    ```cpp
+    for (int i = 0; i < m_ui.StablePlanesActiveCount; i++)
+    {
+        m_nrd[i]->RunDenoiser(
+            commandList,
+            planeRadiance[i],
+            planeNormals[i],
+            planeDepth[i],
+            motionVectors[i]
+        );
+    }
+    ```
+  </Step>
+  
+  <Step title="Composite Result">
+    Combine denoised planes with stable radiance for final image.
+  </Step>
+</Steps>
+
+### Sample Budget
+
+Real-time mode optimizes ray budget for interactivity:
+
+- **Samples per pixel**: 1-2 per frame (configurable)
+- **Bounce depth**: Reduced (3-6 bounces typical)
+- **Light samples**: Fewer NEE samples (1-2 full samples)
+- **Aggressive denoising**: NRD ReLAX or ReBLUR
+
+### Configuration
+
+```cpp
+// Real-time mode settings
+m_ui.RealtimeMode = true;
+m_ui.RealtimeSamplesPerPixel = 1;         // Samples per frame
+m_ui.BounceCount = 24;                     // Total bounces (shared)
+m_ui.RealtimeDiffuseBounceCount = 3;       // Max diffuse bounces
+m_ui.StandaloneDenoiser = true;            // Enable NRD
+
+// Stable planes configuration
+m_ui.StablePlanesActiveCount = 3;          // Number of layers
+m_ui.StablePlanesMaxVertexDepth = 5;       // Max depth to split
+m_ui.StablePlanesSplitStopThreshold = 0.95f; // Roughness threshold
+
+// Anti-aliasing options
+m_ui.RealtimeAA = 3; // 0=None, 1=TAA, 2=DLSS, 3=DLSS-RR
+```
+
+### Denoising Options
+
+<Tabs>
+  <Tab title="NRD ReLAX">
+    **Recommended for real-time**
+    
+    ```cpp
+    m_ui.NRDMethod = NrdConfig::DenoiserMethod::RELAX;
+    m_ui.RelaxSettings = nrd::RelaxSettings();
+    m_ui.RelaxSettings.diffusePrepassBlurRadius = 30.0f;
+    m_ui.RelaxSettings.specularPrepassBlurRadius = 50.0f;
+    ```
+    
+    - Faster than ReBLUR
+    - Good temporal stability
+    - Works well with 1 SPP
+  </Tab>
+  
+  <Tab title="NRD ReBLUR">
+    **Higher quality, more expensive**
+    
+    ```cpp
+    m_ui.NRDMethod = NrdConfig::DenoiserMethod::REBLUR;
+    m_ui.ReblurSettings = nrd::ReblurSettings();
+    m_ui.ReblurSettings.hitDistanceReconstructionMode = 
+        nrd::HitDistanceReconstructionMode::AREA_3X3;
+    ```
+    
+    - Better quality than ReLAX
+    - More expensive
+    - Better for 2+ SPP
+  </Tab>
+</Tabs>
+
+### Primary Surface Replacement
+
+Optimization to skip primary ray trace in second pass:
+
+```cpp
+m_ui.AllowPrimarySurfaceReplacement = true;
+
+// Instead of tracing primary ray in Fill pass,
+// directly load from stable plane 0 built in first pass
+firstHitFromBasePlane(path, 0, workingContext);
+```
+
+This saves one ray per pixel per frame.
+
+### ReSTIR Integration
+
+Real-time mode can use ReSTIR for improved direct and indirect lighting:
+
+<CardGroup cols={2}>
+  <Card title="ReSTIR DI" icon="sun">
+    ```cpp
+    m_ui.UseReSTIRDI = true;
+    ```
+    Spatio-temporal reservoir sampling for direct lighting. Excellent for many-light scenarios.
+  </Card>
+  
+  <Card title="ReSTIR GI" icon="lightbulb">
+    ```cpp
+    m_ui.UseReSTIRGI = true;
+    ```
+    Reservoir-based indirect lighting. Reduces noise in global illumination.
+  </Card>
+</CardGroup>
+
+<Warning>
+**Note**: ReSTIR DI/GI are automatically disabled when using DLSS Ray Reconstruction to avoid conflicts.
+</Warning>
+
+### Firefly Filtering
+
+Real-time mode uses aggressive filtering to work with low sample counts:
+
+```cpp
+if (m_ui.RealtimeFireflyFilterEnabled)
+{
+    // Aggressive threshold for 1 SPP
+    const float threshold = m_ui.RealtimeFireflyFilterThreshold; // 0.15
+    
+    // Optionally relax on stable (non-noisy) surfaces
+    if (m_ui.RealtimeFireflyFilterRelaxOnNonNoisy && isStableSurface)
+        threshold *= 2.0f;
+    
+    radiance = ClampFireflies(radiance, threshold);
+}
+```
+
+### Anti-Aliasing Options
+
+<Tabs>
+  <Tab title="TAA (Temporal AA)">
+    ```cpp
+    m_ui.RealtimeAA = 1;
+    m_ui.TemporalAntiAliasingJitter = 
+        donut::render::TemporalAntiAliasingJitter::R2;
+    ```
+    
+    - CPU-based anti-aliasing
+    - Good quality, minimal overhead
+    - Works with all GPUs
+  </Tab>
+  
+  <Tab title="DLSS Super Resolution">
+    ```cpp
+    m_ui.RealtimeAA = 2;
+    m_ui.DLSSMode = StreamlineInterface::DLSSMode::eBalanced;
+    ```
+    
+    - AI upscaling from lower resolution
+    - 1.5-2x performance boost
+    - NVIDIA RTX GPUs only
+  </Tab>
+  
+  <Tab title="DLSS Ray Reconstruction">
+    ```cpp
+    m_ui.RealtimeAA = 3;
+    m_ui.DLSRRPreset = StreamlineInterface::DLSSRRPreset::ePresetE;
+    ```
+    
+    - AI denoising + upscaling
+    - Best quality for path tracing
+    - Can replace NRD denoiser
+    - NVIDIA RTX 40 series and newer
+  </Tab>
+</Tabs>
+
+### Use Cases
+
+<AccordionGroup>
+  <Accordion title="Interactive Preview">
+    Real-time feedback for:
+    - Scene composition
+    - Lighting adjustments
+    - Material tweaking
+    - Camera framing
+  </Accordion>
+  
+  <Accordion title="Gameplay Integration">
+    Production-ready quality at interactive rates:
+    - 60+ FPS at 1080p with DLSS
+    - 30+ FPS at 4K with DLSS
+    - Denoised, temporally stable output
+  </Accordion>
+  
+  <Accordion title="VR Applications">
+    Low-latency rendering with NVIDIA Reflex:
+    ```cpp
+    m_ui.ReflexMode = StreamlineInterface::ReflexMode::eLowLatency;
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance Comparison
+
+<Note>
+Performance varies greatly based on scene complexity, resolution, and GPU. These are representative numbers on RTX 4090 at 1080p.
+</Note>
+
+| Mode | Resolution | SPP | FPS | Convergence | Quality |
+|------|------------|-----|-----|-------------|---------|
+| **Reference** | 1080p | 1/frame | 60-120 | 4096 frames @ 60fps = 68s | Ground truth |
+| **Reference** | 4K | 1/frame | 15-30 | 4096 frames @ 30fps = 137s | Ground truth |
+| **Real-time** | 1080p (native) | 1 | 45-90 | Instant | High (with NRD) |
+| **Real-time + DLSS** | 1080p→1440p | 1 | 60-120 | Instant | High (with NRD) |
+| **Real-time + DLSS-RR** | 1080p→4K | 1 | 60-100 | Instant | Very High |
+
+## Optimization Guidelines
+
+### Reference Mode
+
+<Steps>
+  <Step title="Reduce Bounce Count">
+    ```cpp
+    m_ui.BounceCount = 16; // Instead of 24
+    ```
+    Diminishing returns after 16 bounces in most scenes.
+  </Step>
+  
+  <Step title="Enable Accumulation Pre-warm">
+    ```cpp
+    m_ui.AccumulationPreWarmRealtimeCaches = true;
+    ```
+    Pre-warms RTXDI/ReSTIR caches before accumulation starts.
+  </Step>
+  
+  <Step title="Lower Sample Target">
+    ```cpp
+    m_ui.AccumulationTarget = 1024; // Instead of 4096
+    ```
+    Faster convergence, slightly more noise.
+  </Step>
+</Steps>
+
+### Real-time Mode
+
+<Steps>
+  <Step title="Reduce Diffuse Bounces">
+    ```cpp
+    m_ui.RealtimeDiffuseBounceCount = 2; // Instead of 3
+    ```
+    Most visible GI comes from first 2 diffuse bounces.
+  </Step>
+  
+  <Step title="Reduce Stable Planes">
+    ```cpp
+    m_ui.StablePlanesActiveCount = 2; // Instead of 3
+    ```
+    Third plane rarely visible in most scenes.
+  </Step>
+  
+  <Step title="Enable DLSS/DLSS-RR">
+    ```cpp
+    m_ui.RealtimeAA = 3; // DLSS-RR
+    m_ui.DLSSMode = StreamlineInterface::DLSSMode::ePerformance;
+    ```
+    Major performance boost with minimal quality loss.
+  </Step>
+  
+  <Step title="Use ReSTIR DI">
+    ```cpp
+    m_ui.UseReSTIRDI = true;
+    m_ui.NEEFullSamples = 1; // Reduce NEE samples
+    ```
+    ReSTIR DI is more efficient than NEE for many-light scenes.
+  </Step>
+</Steps>
+
+## Switching Between Modes
+
+Modes can be switched at runtime:
+
+```cpp
+// Toggle via UI or code
+m_ui.RealtimeMode = !m_ui.RealtimeMode;
+
+// This triggers:
+// - Pipeline recompilation if needed
+// - Cache reset (accumulation/temporal)
+// - Render target reallocation
+```
+
+<Info>
+Switching modes is designed to be seamless - the sample automatically handles all necessary state transitions.
+</Info>
+
+## Best Practices
+
+### When to Use Reference Mode
+
+✅ **Use Reference Mode for:**
+- Final-quality renders
+- Ground truth validation
+- Material/lighting verification
+- Screenshot/marketing material
+
+❌ **Don't Use Reference Mode for:**
+- Interactive preview
+- Real-time applications
+- Gameplay
+
+### When to Use Real-time Mode
+
+✅ **Use Real-time Mode for:**
+- Interactive editing
+- Real-time applications
+- Gameplay preview
+- VR experiences
+
+❌ **Don't Use Real-time Mode for:**
+- Final quality renders (unless using DLSS-RR with high SPP)
+- Extreme accuracy requirements
+
+## Advanced: Hybrid Workflow
+
+Combine both modes for optimal workflow:
+
+1. **Preview in Real-time**: Quick iteration on scene composition
+2. **Validate with Reference**: Spot-check quality at key frames  
+3. **Final Render**: Use Reference mode or Real-time + DLSS-RR
+
+```cpp
+// Quick toggle with keyboard shortcut
+if (keyPressed == GLFW_KEY_R)
+{
+    m_ui.RealtimeMode = !m_ui.RealtimeMode;
+    m_ui.ResetAccumulation = true;
+}
+```

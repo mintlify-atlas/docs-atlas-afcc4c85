@@ -1,0 +1,608 @@
+---
+title: "Lighting System"
+description: "Next event estimation, importance sampling, and polymorphic light types"
+---
+
+## Overview
+
+The NVIDIA RTX Path Tracer implements a sophisticated lighting system with next event estimation (NEE), multiple importance sampling (MIS), and support for various light types including analytic lights, emissive geometry, and environment maps with importance sampling.
+
+## Next Event Estimation (NEE)
+
+NEE performs direct light sampling at each path vertex to reduce variance:
+
+```hlsl
+inline NEEResult HandleNEE(
+    const uniform OptimizationHints optimizationHints,
+    const PathState preScatterPath,
+    const ShadingData shadingData,
+    const ActiveBSDF bsdf,
+    const SampleGeneratorVertexBase sgBase,
+    const WorkingContext workingContext)
+{
+    // Check if BSDF has non-delta lobes
+    const uint lobes = bsdf.getLobes(shadingData);
+    const bool hasNonDeltaLobes = ((lobes & (uint)LobeType::NonDelta) != 0) && 
+                                  (!optimizationHints.OnlyDeltaLobes);
+    
+    NEEResult result = NEEResult::empty();
+    
+    if (!PT_NEE_ENABLED || !hasNonDeltaLobes)
+        return result;
+    
+    // Perform multi-sample NEE
+    HandleNEE_MultipleSamples(result, preScatterPath, shadingData, bsdf, 
+                               sgBase, workingContext, sampleCountBoost);
+    
+    return result;
+}
+```
+
+### NEE Result Structure
+
+```hlsl
+struct NEEResult
+{
+    float4 RadianceAndSpecAvg;           // RGB radiance + specular average
+    float SpecRadianceSourceDistance;    // Distance for denoiser
+    NEEBSDFMISInfo BSDFMISInfo;          // MIS information
+    
+    static NEEResult empty()
+    {
+        NEEResult r;
+        r.RadianceAndSpecAvg = float4(0, 0, 0, 0);
+        r.SpecRadianceSourceDistance = 0;
+        r.BSDFMISInfo = NEEBSDFMISInfo::empty();
+        return r;
+    }
+    
+    void AccumulateRadiance(float3 radiance, float specAvg)
+    {
+        RadianceAndSpecAvg += float4(radiance, specAvg);
+    }
+};
+```
+
+## Weighted Reservoir Sampling
+
+NEE uses weighted reservoir sampling to select the best light from multiple candidates:
+
+```hlsl
+struct WRSSingleSampleHelper
+{
+    PathLightSample PickedCandidate;
+    float ReservoirTotalWeight;
+    float PickedCandidateWeight;
+    
+    static WRSSingleSampleHelper make();
+    
+    void InsertCandidate(float randomValue, 
+                         PathLightSample candidateSample, 
+                         float candidateWeight)
+    {
+        // Weighted Reservoir Sampling
+        ReservoirTotalWeight += candidateWeight;
+        float wrsThreshold = saturate(candidateWeight / ReservoirTotalWeight);
+        
+        if (randomValue < wrsThreshold)
+        {
+            PickedCandidate = candidateSample;
+            PickedCandidateWeight = candidateWeight;
+        }
+    }
+    
+    PathLightSample GetResult(uint totalCandidates)
+    {
+        float pickedCandidatePdf = PickedCandidateWeight / ReservoirTotalWeight;
+        pickedCandidatePdf *= (float)totalCandidates;
+        PickedCandidate.Li /= pickedCandidatePdf;
+        return PickedCandidate;
+    }
+};
+```
+
+## Light Sample Generation
+
+```hlsl
+inline PathLightSample GenerateLightSample(
+    const WorkingContext workingContext,
+    const ShadingData shadingData,
+    const ActiveBSDF bsdf,
+    const uint wrsCandidateSampleCount,
+    inout UniformSampleSequenceGenerator sampleGeneratorLights,
+    inout UniformSampleSequenceGenerator sampleGeneratorWRS,
+    const LightSampler lightSampler,
+    const bool sampleIsLocal)
+{
+    WRSSingleSampleHelper wrs = WRSSingleSampleHelper::make();
+    
+    for (uint i = 0; i < wrsCandidateSampleCount; i++)
+    {
+        // Sample light from distribution
+        uint lightIndex = 0;
+        float selectionPdf = 0;
+        
+        float rnd = sampleNext1D(sampleGeneratorLights);
+        if (sampleIsLocal)
+            lightIndex = lightSampler.SampleLocal(rnd, selectionPdf);
+        else
+            lightIndex = lightSampler.SampleGlobal(rnd, selectionPdf);
+        
+        const PolymorphicLightInfoFull packedLightInfo = lightSampler.LoadLight(lightIndex);
+        const float2 interiorSampleRnd = sampleNext2D(sampleGeneratorLights);
+        
+        // Sample point on light
+        PolymorphicLightSample lightSample = PolymorphicLight::CalcSample(
+            packedLightInfo, interiorSampleRnd, shadingData.posW);
+        
+        // Create path light sample
+        PathLightSample candidateSample;
+        const float pdf = lightSample.SolidAnglePdf * selectionPdf;
+        candidateSample.Li = pdf > 0.f ? (lightSample.Radiance / pdf) : float3(0, 0, 0);
+        candidateSample.SolidAnglePdf = lightSample.SolidAnglePdf;
+        
+        float3 surfToLight = lightSample.Position - shadingData.posW;
+        candidateSample.Distance = length(surfToLight);
+        candidateSample.Direction = surfToLight / max(candidateSample.Distance, 1e-7);
+        candidateSample.LightIndex = lightIndex;
+        candidateSample.SelectionPdf = selectionPdf;
+        
+        // Insert into reservoir with weight
+        wrs.InsertCandidate(sampleNext1D(sampleGeneratorWRS), candidateSample,
+                             EvalSampleWeight(candidateSample, shadingData, bsdf));
+        
+        sampleGeneratorLights.AdvanceSampleIndex();
+    }
+    
+    return wrs.GetResult(wrsCandidateSampleCount);
+}
+```
+
+### Sample Weight Evaluation
+
+```hlsl
+inline float EvalSampleWeight(const PathLightSample lightSample,
+                               const ShadingData shadingData,
+                               const ActiveBSDF bsdf)
+{
+    // Fast approximation using max component instead of full BSDF eval
+    float weight = max3(lightSample.Li) * 
+                   bsdf.evalPdf(shadingData, lightSample.Direction, kUseBSDFSampling);
+    return weight;
+}
+```
+
+## Processing Light Samples
+
+```hlsl
+void ProcessLightSample(
+    inout NEEResult accum,
+    inout float specSum,
+    PathLightSample lightSample,
+    bool sampleIsLocal,
+    uint localNEESamples,
+    uint totalSamples,
+    const ShadingData shadingData,
+    const ActiveBSDF bsdf,
+    const PathState preScatterPath,
+    LightSampler lightSampler,
+    inout UniformSampleSequenceGenerator sampleGeneratorFeedback,
+    const WorkingContext workingContext)
+{
+    RayDesc ray;
+    bool visible = false;
+    
+    if (lightSample.Valid())
+    {
+        ray = lightSample.ComputeVisibilityRay(shadingData).toRayDesc();
+        visible = Bridge::traceVisibilityRay(ray, preScatterPath.rayCone,
+                                              preScatterPath.getVertexIndex(),
+                                              workingContext.Debug);
+    }
+    
+    if (visible)
+    {
+        // Grazing angle fadeout
+        float fadeOut = (shadingData.shadowNoLFadeout > 0) ?
+            ComputeLowGrazingAngleFalloff(ray.Direction, shadingData.vertexN,
+                                          shadingData.shadowNoLFadeout,
+                                          2.0 * shadingData.shadowNoLFadeout) : 1.0;
+        
+        // Multiple importance sampling
+        float scatterPdfForDir = bsdf.evalPdf(shadingData, lightSample.Direction,
+                                               kUseBSDFSampling);
+        float misWeight = lightSampler.ComputeInternalMIS(shadingData.posW,
+                                                           lightSample, sampleIsLocal,
+                                                           localNEESamples, totalSamples,
+                                                           scatterPdfForDir);
+        
+        lightSample.Li *= fadeOut * misWeight;
+        
+        // Evaluate BSDF
+        float4 bsdfThp = bsdf.eval(shadingData, lightSample.Direction);
+        
+        // Compute radiance
+        float3 radiance = bsdfThp.rgb * lightSample.Li;
+        float specAvg = bsdfThp.w * Average(lightSample.Li);
+        
+        // Apply path throughput
+        radiance *= preScatterPath.thp;
+        specAvg *= Average(preScatterPath.thp);
+        
+        // Accumulate
+        accum.AccumulateRadiance(radiance, specAvg);
+        accum.SpecRadianceSourceDistance += lightSample.Distance * specAvg;
+        specSum += specAvg;
+        
+        // Temporal feedback for adaptive sampling
+        if (lightSample.LightIndex != RTXPT_INVALID_LIGHT_INDEX &&
+            lightSampler.IsTemporalFeedbackRequired())
+        {
+            float feedbackWeight = Average(radiance);
+            float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH];
+            for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+                randomValues[i] = sampleNext1D(sampleGeneratorFeedback);
+            
+            lightSampler.InsertFeedbackFromNEE(lightSample.LightIndex,
+                                                feedbackWeight, randomValues);
+        }
+    }
+}
+```
+
+## Polymorphic Light Types
+
+The system supports multiple light types through a unified interface:
+
+```hlsl
+enum PolymorphicLightType
+{
+    kSphere = 0,
+    kTriangle,
+    kDirectional,
+    kEnvironment,
+    kPoint,
+    kEnvironmentQuad,
+};
+```
+
+### Polymorphic Light Storage
+
+```hlsl
+struct PolymorphicLightInfo
+{
+    // uint4[0]
+    float3 Center;
+    uint ColorTypeAndFlags;  // RGB8 + uint8 for type/flags
+    
+    // uint4[1]
+    uint Direction1;         // Oct-encoded
+    uint Direction2;         // Oct-encoded
+    uint Scalars;            // 2x float16
+    uint LogRadiance;        // uint16 packed log radiance
+};
+
+struct PolymorphicLightInfoEx
+{
+    // uint4[2] - Extended shaping data
+    uint IesProfileIndex;
+    uint PrimaryAxis;                    // Oct-encoded
+    uint CosConeAngleAndSoftness;        // 2x float16
+    uint UniqueID;
+};
+
+struct PolymorphicLightInfoFull
+{
+    PolymorphicLightInfo Base;
+    PolymorphicLightInfoEx Extended;
+};
+```
+
+### Light Constants
+
+```hlsl
+#define DISTANT_LIGHT_DISTANCE 100000.0
+
+static const float kMinSpotlightFalloff = 0.0001f;
+static const uint kPolymorphicLightTypeShift = 24;
+static const uint kPolymorphicLightTypeMask = 0xf;
+static const uint kPolymorphicLightShapingEnableBit = 1 << 28;
+static const uint kPolymorphicLightIesProfileEnableBit = 1 << 29;
+static const float kPolymorphicLightMinLog2Radiance = -8.f;
+static const float kPolymorphicLightMaxLog2Radiance = 40.f;
+```
+
+## Directional Lights
+
+Parallel light sources at infinite distance:
+
+```hlsl
+struct DirectionalLight
+{
+    float3 direction;
+    float3 radiance;
+    
+    PolymorphicLightSample CalcSample(float2 random, float3 shadingPos)
+    {
+        PolymorphicLightSample sample;
+        sample.Position = shadingPos + direction * DISTANT_LIGHT_DISTANCE;
+        sample.Radiance = radiance;
+        sample.SolidAnglePdf = 1.0; // Delta distribution
+        sample.LightSampleableByBSDF = false;
+        return sample;
+    }
+};
+```
+
+## Point and Sphere Lights
+
+```hlsl
+struct SphereLight
+{
+    float3 center;
+    float radius;
+    float3 radiance;
+    
+    PolymorphicLightSample CalcSample(float2 random, float3 shadingPos)
+    {
+        // Sample point on sphere surface
+        float3 dir = sampleUniformSphere(random);
+        float3 surfacePoint = center + dir * radius;
+        
+        float3 toLight = surfacePoint - shadingPos;
+        float distSq = dot(toLight, toLight);
+        float dist = sqrt(distSq);
+        
+        PolymorphicLightSample sample;
+        sample.Position = surfacePoint;
+        sample.Radiance = radiance;
+        
+        // Solid angle PDF
+        float3 lightNormal = -dir;
+        float cosTheta = max(0.0, dot(lightNormal, -toLight / dist));
+        float solidAngle = (radius * radius * K_PI) * cosTheta / distSq;
+        sample.SolidAnglePdf = 1.0 / max(solidAngle, 1e-10);
+        sample.LightSampleableByBSDF = false;
+        
+        return sample;
+    }
+};
+```
+
+## Triangle Lights
+
+Emissive mesh triangles:
+
+```hlsl
+struct TriangleLight
+{
+    float3 v0, v1, v2;  // Vertices
+    float3 radiance;
+    float area;
+    
+    PolymorphicLightSample CalcSample(float2 random, float3 shadingPos)
+    {
+        // Uniform triangle sampling
+        float sqrtU = sqrt(random.x);
+        float v = random.y;
+        float bary0 = 1.0 - sqrtU;
+        float bary1 = sqrtU * (1.0 - v);
+        float bary2 = sqrtU * v;
+        
+        float3 surfacePoint = bary0 * v0 + bary1 * v1 + bary2 * v2;
+        float3 normal = normalize(cross(v1 - v0, v2 - v0));
+        
+        float3 toLight = surfacePoint - shadingPos;
+        float distSq = dot(toLight, toLight);
+        float dist = sqrt(distSq);
+        
+        PolymorphicLightSample sample;
+        sample.Position = surfacePoint;
+        sample.Radiance = radiance;
+        
+        // Convert area PDF to solid angle PDF
+        float cosTheta = max(0.0, dot(normal, -toLight / dist));
+        sample.SolidAnglePdf = (distSq / (area * cosTheta));
+        sample.LightSampleableByBSDF = true;  // Can be hit by BSDF rays
+        
+        return sample;
+    }
+};
+```
+
+## Environment Maps
+
+### Environment Map Parameters
+
+```hlsl
+struct EnvMapSceneParams
+{
+    float3x4 Transform;       // Local to world transform
+    float3x4 InvTransform;    // World to local transform
+    float3 ColorMultiplier;   // Tint and intensity
+    float Enabled;
+};
+
+struct EnvMapImportanceSamplingParams
+{
+    float2 ImportanceInvDim;  // 1.0 / dimension
+    uint ImportanceBaseMip;   // Mip level for 1x1 resolution
+    uint padding0;
+};
+```
+
+### Environment Quad Light
+
+Hierarchical importance sampling for environment maps:
+
+```hlsl
+struct EnvironmentQuadLight
+{
+    uint nodeDim;     // Dimension of the hierarchical grid
+    uint nodeX, nodeY; // Position in the grid
+    float3 radiance;
+    
+    // Transform between local and world space
+    float3 ToWorld(float3 localDir);
+    float3 ToLocal(float3 worldDir);
+    float3 SampleLocalSpace(float3 localDir);
+    
+    PolymorphicLightSample CalcSample(float2 random, float3 shadingPos)
+    {
+        // Importance sample within this quad region
+        float2 uv = ComputeQuadUV(nodeX, nodeY, nodeDim, random);
+        float3 localDir = SampleEquirectangularMap(uv);
+        float3 worldDir = ToWorld(localDir);
+        
+        PolymorphicLightSample sample;
+        sample.Position = shadingPos + worldDir * DISTANT_LIGHT_DISTANCE;
+        sample.Radiance = SampleLocalSpace(localDir);
+        sample.SolidAnglePdf = ComputePdf(uv, nodeDim);
+        sample.LightSampleableByBSDF = true;
+        
+        return sample;
+    }
+};
+```
+
+## Multiple Importance Sampling
+
+### Power Heuristic
+
+```hlsl
+float PowerHeuristic(float nf, float fPdf, float ng, float gPdf)
+{
+    float f = nf * fPdf;
+    float g = ng * gPdf;
+    return (f * f) / (f * f + g * g);
+}
+```
+
+### MIS for Emissive Triangles
+
+```hlsl
+float ComputeBSDFMISForEmissiveTriangle(
+    uint lightIndex,
+    float bsdfPdf,
+    float3 rayOrigin,
+    float3 lightPos,
+    uint localNEESamples,
+    uint totalSamples)
+{
+    // Get light sampling PDF
+    float lightPdf = GetLightSamplingPdf(lightIndex, rayOrigin, lightPos);
+    
+    // Combine PDFs
+    float neeCount = (float)totalSamples;
+    float bsdfCount = 1.0;
+    
+    return PowerHeuristic(neeCount, lightPdf, bsdfCount, bsdfPdf);
+}
+```
+
+## Light Sampling Strategy
+
+### Lighting Control Data
+
+```hlsl
+struct LightingControlData
+{
+    uint TotalLightCount;
+    uint EnvmapQuadNodeCount;
+    uint AnalyticLightCount;
+    uint TriangleLightCount;
+    
+    uint SamplingProxyCount;
+    uint HistoricTotalLightCount;
+    uint LastFrameTemporalFeedbackAvailable;
+    uint LastFrameLocalSamplesAvailable;
+    
+    float LightSampling_MIS_Boost;
+    uint TemporalFeedbackRequired;
+    
+    uint2 LocalSamplingResolution;
+    float DirectVsIndirectThreshold;
+};
+```
+
+### Local vs Global Sampling
+
+```hlsl
+inline uint ComputeLocalSampleCount(
+    const float localTemporalFeedbackRatio,
+    const uint totalSamples)
+{
+    return (uint)((float)(totalSamples - 1) * localTemporalFeedbackRatio + 0.75f);
+}
+
+inline uint ComputeGlobalSampleCount(
+    const float localTemporalFeedbackRatio,
+    const uint totalSamples)
+{
+    return totalSamples - ComputeLocalSampleCount(localTemporalFeedbackRatio, totalSamples);
+}
+```
+
+## Temporal Light Feedback
+
+Adaptive light sampling based on previous frame importance:
+
+```hlsl
+struct LightFeedbackReservoir
+{
+    uint2 PixelPos;
+    RWTexture2D<float> TextureTotalWeight;
+    RWTexture2D<NEEAT_FEEDBACK_CANDIDATE_TYPE> TextureCandidates;
+    
+    float TotalWeight;
+    NEEAT_FEEDBACK_CANDIDATE_TYPE Candidates;
+    
+    void Add(const float randomValues[RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH],
+             uint candidateIndex,
+             float candidateWeight,
+             bool candidateIsIndirect)
+    {
+        float totalWeight = GetTotalWeight();
+        totalWeight += candidateWeight;
+        SetTotalWeight(totalWeight);
+        
+        float threshold = saturate(candidateWeight / totalWeight);
+        
+        // Stochastically add to slots
+        for (int i = 0; i < RTXPT_LIGHTING_FEEDBACK_CANDIDATES_PER_PATH; i++)
+            if (randomValues[i] < threshold)
+                SetCandidate(i, candidateIndex, candidateIsIndirect);
+    }
+};
+```
+
+## Light Shaping
+
+Support for IES profiles and cone shaping:
+
+```hlsl
+float EvaluateIESProfile(uint iesProfileIndex, float3 direction);
+
+float EvaluateConeShaping(float3 lightDir,
+                          float3 primaryAxis,
+                          float cosConeAngle,
+                          float softness)
+{
+    float cosTheta = dot(lightDir, primaryAxis);
+    
+    if (cosTheta < cosConeAngle - softness)
+        return 0.0;
+    
+    if (cosTheta > cosConeAngle)
+        return 1.0;
+    
+    // Smooth transition
+    float t = (cosTheta - (cosConeAngle - softness)) / softness;
+    return smoothstep(0.0, 1.0, t);
+}
+```
+
+## Related Topics
+
+- [Overview](/api/path-tracer/overview) - Path tracer architecture
+- [Materials](/api/path-tracer/materials) - BSDF and material system

@@ -1,0 +1,248 @@
+---
+title: PostProcess
+description: Post-processing system for denoiser integration and debug visualization
+---
+
+The `PostProcess` class manages compute-based post-processing passes for denoiser preparation and final merging operations in the RTX Path Tracing pipeline.
+
+## Overview
+
+PostProcess handles several key operations:
+- Preparing inputs for RELAX and REBLUR denoisers (NRD)
+- Preparing inputs for DLSS Ray Reconstruction
+- Merging denoised diffuse and specular outputs
+- Debug visualization for stable planes
+
+## Class Definition
+
+```cpp
+class PostProcess 
+{
+public:
+    enum class ComputePassType
+    {
+        StablePlanesDebugViz,
+        RELAXDenoiserPrepareInputs,
+        REBLURDenoiserPrepareInputs,
+        RELAXDenoiserFinalMerge,
+        REBLURDenoiserFinalMerge,
+        DLSSRRDenoiserPrepareInputs,
+        NoDenoiserFinalMerge,
+        DummyPlaceholder,
+        MaxCount
+    };
+
+    PostProcess(
+        nvrhi::IDevice* device,
+        std::shared_ptr<donut::engine::ShaderFactory> shaderFactory,
+        std::shared_ptr<donut::engine::CommonRenderPasses> commonPasses,
+        std::shared_ptr<ShaderDebug> shaderDebug
+    );
+
+    void Apply(
+        nvrhi::ICommandList* commandList,
+        ComputePassType passType,
+        nvrhi::BufferHandle consts,
+        SampleMiniConstants& miniConsts,
+        nvrhi::BindingSetHandle bindingSet,
+        nvrhi::BindingLayoutHandle bindingLayout,
+        uint32_t width,
+        uint32_t height
+    );
+};
+```
+
+Source: `PostProcess.h:33`
+
+## Compute Pass Types
+
+### Denoiser Preparation
+
+These passes prepare path tracing outputs for input to denoisers:
+
+- **RELAXDenoiserPrepareInputs** - Prepares inputs for NVIDIA Real-time Denoisers (NRD) RELAX denoiser
+- **REBLURDenoiserPrepareInputs** - Prepares inputs for NRD REBLUR denoiser  
+- **DLSSRRDenoiserPrepareInputs** - Prepares inputs for DLSS Ray Reconstruction
+
+### Denoiser Merging
+
+These passes combine denoised results back into the final output:
+
+- **RELAXDenoiserFinalMerge** - Merges RELAX denoised diffuse and specular
+- **REBLURDenoiserFinalMerge** - Merges REBLUR denoised diffuse and specular
+- **NoDenoiserFinalMerge** - Direct merge without denoising
+
+### Debug Visualization
+
+- **StablePlanesDebugViz** - Debug visualization for stable planes data
+
+## Shader Implementation
+
+The shader passes are implemented in `PostProcess.hlsl` with different macro configurations:
+
+```cpp
+// Example from PostProcess.cpp:36
+switch ((ComputePassType)i)
+{
+case(ComputePassType::RELAXDenoiserPrepareInputs):
+    shaderMacros.push_back(ShaderMacro({ "DENOISER_PREPARE_INPUTS", "1" }));
+    shaderMacros.push_back(ShaderMacro({ "USE_RELAX", "1" }));
+    break;
+case(ComputePassType::RELAXDenoiserFinalMerge): 
+    shaderMacros.push_back(ShaderMacro({ "DENOISER_FINAL_MERGE", "1" })); 
+    shaderMacros.push_back(ShaderMacro({ "USE_RELAX", "1" }));
+    break;
+}
+```
+
+Source: `PostProcess.cpp:36-48`
+
+## Denoiser Prepare Inputs
+
+The prepare inputs pass extracts geometry and radiance data from stable planes and formats them for denoiser consumption:
+
+```hlsl
+[numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
+void main( uint3 dispatchThreadID : SV_DispatchThreadID )
+{
+    const uint stablePlaneIndex = g_MiniConst.params[0];
+    const bool initWithStableRadiance = g_MiniConst.params[1];
+    
+    // Load stable plane data
+    StablePlane sp = stablePlanes.LoadStablePlane(pixelPos, stablePlaneIndex);
+    
+    // Extract BSDF estimates for albedo
+    float3 diffBSDFEstimate, specBSDFEstimate;
+    UnpackTwoFp32ToFp16(sp.DenoiserPackedBSDFEstimate, diffBSDFEstimate, specBSDFEstimate);
+    
+    // Demodulate radiance by albedo
+    denoiserDiffRadianceHitDist.xyz /= diffBSDFEstimate.xyz;
+    denoiserSpecRadianceHitDist.xyz /= specBSDFEstimate.xyz;
+    
+    // Pack for NRD
+    u_DenoiserNormalRoughness[pixelPos] = 
+        NRD_FrontEnd_PackNormalAndRoughness(sp.GetNormal(), finalRoughness, 0);
+}
+```
+
+Source: `PostProcess.hlsl:270-399`
+
+## Radiance Clamping
+
+To prevent fireflies and numerical overflow in FP16 denoisers, inputs are clamped:
+
+```hlsl
+void NRDRadianceClamp( inout float4 radianceHitT, const float rangeK )
+{
+    const float kClampMin = g_Const.ptConsts.preExposedGrayLuminance/rangeK;
+    const float kClampMax = min( 255.0, g_Const.ptConsts.preExposedGrayLuminance*rangeK );
+    
+    const float lum = Luminance( radianceHitT.xyz );
+    if (lum > kClampMax)
+        radianceHitT.xyz *= kClampMax / lum;
+}
+```
+
+Source: `PostProcess.hlsl:92-103`
+
+## Denoiser Final Merge
+
+The final merge pass remodulates denoised radiance and combines it into the output:
+
+```hlsl
+[numthreads(NUM_COMPUTE_THREADS_PER_DIM, NUM_COMPUTE_THREADS_PER_DIM, 1)]
+void main( uint3 dispatchThreadID : SV_DispatchThreadID )
+{
+    const uint stablePlaneIndex = g_MiniConst.params.x;
+    
+    bool hasSurface = t_DenoiserViewspaceZ[pixelPos] != VIEWZ_SKY_MARKER;
+    
+    if (hasSurface)
+    {
+        // Unpack albedo
+        float3 diffBSDFEstimate, specBSDFEstimate;
+        UnpackTwoFp32ToFp16(
+            t_StablePlanesBuffer[spAddress].DenoiserPackedBSDFEstimate,
+            diffBSDFEstimate, specBSDFEstimate);
+        
+        // Read denoised radiance
+        float4 diffRadiance = t_DiffRadiance[pixelPos];
+        float4 specRadiance = t_SpecRadiance[pixelPos];
+        
+        // Remodulate with albedo and combine
+        DenoiserNRD::PostDenoiseProcess(
+            diffBSDFEstimate, specBSDFEstimate, 
+            diffRadiance, specRadiance);
+        
+        u_InputOutput[pixelPos].xyz += max(0, diffRadiance.rgb + specRadiance.rgb);
+    }
+}
+```
+
+Source: `PostProcess.hlsl:446-540`
+
+## Disocclusion Relaxation
+
+The system computes disocclusion factors to relax denoiser history constraints at geometric edges:
+
+```hlsl
+float ComputeDisocclusionRelaxation(
+    const StablePlanesContext stablePlanes,
+    const uint2 pixelPos,
+    const uint stablePlaneIndex,
+    const uint spBranchID,
+    const StablePlane sp)
+{
+    float disocclusionRelax = 0;
+    const float3 rayDirC = sp.GetNormal();
+    
+    // Check 4-connected neighbors
+    disocclusionRelax += ComputeNeighbourDisocclusionRelaxation(
+        stablePlanes, pixelPos, imageSize, stablePlaneIndex, rayDirC, int2(-1, 0));
+    disocclusionRelax += ComputeNeighbourDisocclusionRelaxation(
+        stablePlanes, pixelPos, imageSize, stablePlaneIndex, rayDirC, int2( 1, 0));
+    // ... more neighbors
+    
+    return saturate( (disocclusionRelax-0.00002) * 25 );
+}
+```
+
+Source: `PostProcess.hlsl:71-89`
+
+## Usage Example
+
+```cpp
+// Create post-process system
+auto postProcess = std::make_shared<PostProcess>(
+    device, shaderFactory, commonPasses, shaderDebug);
+
+// Prepare inputs for RELAX denoiser
+postProcess->Apply(
+    commandList,
+    PostProcess::ComputePassType::RELAXDenoiserPrepareInputs,
+    pass,
+    constantBuffer,
+    miniConsts,
+    workTexture,
+    renderTargets,
+    sourceTexture
+);
+
+// After denoising, merge results
+postProcess->Apply(
+    commandList,
+    PostProcess::ComputePassType::RELAXDenoiserFinalMerge,
+    pass,
+    constantBuffer,
+    miniConsts,
+    outputTexture,
+    renderTargets,
+    nullptr
+);
+```
+
+## See Also
+
+- [Accumulation Pass](/api/accumulation) - Temporal accumulation for reference mode
+- [Tone Mapper](/api/tone-mapper) - HDR to LDR conversion
+- Stable Planes - Multi-bounce path decomposition
